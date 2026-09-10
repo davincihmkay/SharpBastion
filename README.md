@@ -8,6 +8,10 @@ Privacy is structural, not configured. LmStudio runs on-device by default, and e
 
 Every side effect: a write, a script run or an external LLM call, passes through one named, auditable protocol. The model enables. The system decides
 
+<p align="center">
+  <img src="assets/sharpbastion_gif_protocol.gif" alt="OpenHarness Terminal Demo" width="800">
+</p>
+
 **Core principles:**
 
 - **System-controlled execution.** The LLM does not initiate actions. It receives exactly the context the system prepares, responds, and stops. All subsequent behaviour is determined by the system, not the model.
