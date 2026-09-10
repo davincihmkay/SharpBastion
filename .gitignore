@@ -1,0 +1,100 @@
+# Prerequisites
+*.d
+
+# Object files
+*.o
+*.ko
+*.obj
+*.elf
+
+# Linker output
+*.ilk
+*.map
+*.exp
+
+# Precompiled Headers
+*.gch
+*.pch
+
+# Libraries
+*.lib
+*.a
+*.la
+*.lo
+
+# Shared objects (inc. Windows DLLs)
+*.dll
+*.so
+*.so.*
+*.dylib
+
+# Executables
+*.exe
+*.out
+*.app
+*.i*86
+*.x86_64
+*.hex
+
+# Debug files
+*.dSYM/
+*.su
+*.idb
+*.pdb
+
+# Kernel Module Compile Results
+*.mod*
+*.cmd
+.tmp_versions/
+modules.order
+Module.symvers
+Mkfile.old
+dkms.conf
+
+# debug information files
+*.dwo
+
+# Build output
+bin/
+obj/
+
+# macOS
+.DS_Store
+
+# JetBrains IDEs
+.idea/
+*.DotSettings.user
+
+# Secrets / credentials — never commit
+.env
+.env.*
+.envrc
+*.credentials
+*.credentials.json
+*.secret
+*.secrets
+secrets/
+.secrets/
+
+# Claude CLI local auth — runtime only, must not be committed
+.claude/
+
+# Local runtime configuration — per-clone, not versioned. Copy
+# appsettings.example.json to appsettings.json and configure it locally.
+appsettings.json
+
+# Local assistant persona — per-clone, not versioned. Everything under Config/
+# is ignored except the shipped example; copy the example to your own file
+# under Config/ (any name — e.g. coolassistant.md) and point 'Assistant:SystemPromptPath'
+# (appsettings.json, or the 'Assistant__SystemPromptPath' env var — an absolute
+# path is recommended for a personal file) at it. AssistantProfile derives the
+# CLI's displayed name from that file's own base name.
+Config/*
+!Config/system-prompt.example.md
+
+# Personal automation scripts — per-clone, not versioned. Only the scheduler
+# smoke-test script (exercises the scheduling pipeline end-to-end with no
+# external dependencies) ships publicly; everything else under Scripts/ is
+# local/personal and must not be committed.
+Scripts/*
+!Scripts/testJobScheduler.py

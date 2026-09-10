@@ -1,0 +1,36 @@
+**/.dockerignore
+**/.env
+**/.git
+**/.gitignore
+**/.project
+**/.settings
+**/.toolstarget
+**/.vs
+**/.vscode
+**/.idea
+**/*.*proj.user
+**/*.dbmdl
+**/*.jfm
+**/azds.yaml
+**/bin
+**/charts
+**/docker-compose*
+**/Dockerfile*
+**/node_modules
+**/npm-debug.log
+**/obj
+**/secrets.dev.yaml
+**/values.dev.yaml
+LICENSE
+README.md
+
+# Local assistant persona — per-clone, not versioned. Mirrors .gitignore's
+# Config/* exclusion so a local docker build never bakes a personal
+# system-prompt file into the image.
+Config/*
+!Config/system-prompt.example.md
+
+# Personal automation scripts — mirrors .gitignore's Scripts/* exclusion so a
+# local docker build never bakes personal scheduled-job scripts into the image.
+Scripts/*
+!Scripts/testJobScheduler.py
