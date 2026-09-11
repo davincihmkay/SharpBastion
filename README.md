@@ -4,7 +4,7 @@
 
 SharpBastion is a system-first LLM harness, built on domain-driven design in C#. A domain layer of value objects, protocol-gated commands, and explicit queues decides what a model's output is allowed to become. The model runs isolated, read-only, and session-scoped: no write-side tools, no access beyond its own packaged repository context. The model contributes text. The domain model contributes judgment.
 
-Privacy is structural, not configured. LM Studio runs on-device by default, and every sensitive path, such as repository content leaving the machine, a script escaping 'Scripts/', or an execution running unattended, is closed by default and opened only by explicit protocol override.
+Privacy is structural, not configured. LM Studio runs on-device by default, and every sensitive path, such as repository content leaving the machine, a script escaping `Scripts/`, or an execution running unattended, is closed by default and opened only by explicit protocol override.
 
 Every side effect, whether a write, a script run, or an external LLM call, passes through one named, auditable protocol. The model enables. The system decides.
 
