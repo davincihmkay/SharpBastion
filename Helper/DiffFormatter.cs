@@ -25,6 +25,54 @@ public static class DiffFormatter
         return string.Join(Environment.NewLine, hunks.Select(FormatHunk));
     }
 
+    /// <summary>
+    /// Structured, line-level view of the same diff BuildUnifiedDiff renders
+    /// as text. Added for the colorized review path (ConsoleHighlighterService):
+    /// callers that highlight the *whole* original/proposed file for full
+    /// syntax context need to re-attach each diff line to its highlighted
+    /// counterpart by index, rather than re-deriving structure from the
+    /// formatted string. Marker is '@' for a hunk header (Text is the whole
+    /// "@@ ... @@" line, indexes null), otherwise ' ' / '-' / '+'.
+    /// </summary>
+    public readonly record struct DiffLine(char Marker, string Text, int? OldIndex, int? NewIndex);
+
+    public static IReadOnlyList<DiffLine> BuildDiffLines(string originalContent, string proposedContent)
+    {
+        var oldLines = SplitLines(originalContent);
+        var newLines = SplitLines(proposedContent);
+
+        var ops = Diff(oldLines, newLines);
+        var hunks = GroupIntoHunks(ops);
+
+        if (hunks.Count == 0)
+            return Array.Empty<DiffLine>();
+
+        var lines = new List<DiffLine>();
+        foreach (var hunk in hunks)
+        {
+            lines.Add(new DiffLine('@', $"@@ -{hunk.OldStart},{hunk.OldCount} +{hunk.NewStart},{hunk.NewCount} @@", null, null));
+
+            foreach (var op in hunk.Ops)
+            {
+                var marker = op.Kind switch
+                {
+                    OpKind.Equal => ' ',
+                    OpKind.Delete => '-',
+                    OpKind.Insert => '+',
+                    _ => ' '
+                };
+
+                lines.Add(new DiffLine(
+                    marker,
+                    op.Line,
+                    op.OldIndex >= 0 ? op.OldIndex : null,
+                    op.NewIndex >= 0 ? op.NewIndex : null));
+            }
+        }
+
+        return lines;
+    }
+
     private static List<string> SplitLines(string content) =>
         string.IsNullOrEmpty(content)
             ? new List<string>()

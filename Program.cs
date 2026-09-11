@@ -6,6 +6,7 @@ using SharpBastion.Client;
 using SharpBastion.Controller;
 using SharpBastion.Domain;
 using SharpBastion.DomainService;
+using SharpBastion.Helper;
 using SharpBastion.Interface;
 using SharpBastion.Options;
 using SharpBastion.Protocol;
@@ -23,6 +24,24 @@ builder.Logging.AddFilter("System.Net.Http.HttpClient.HealthCheck", LogLevel.Non
 builder.Services.Configure<AssistantOptions>(builder.Configuration.GetSection(AssistantOptions.SectionName));
 builder.Services.AddSingleton(sp =>
     AssistantProfile.Load(sp.GetRequiredService<IOptions<AssistantOptions>>().Value));
+
+builder.Services.Configure<HighlightOptions>(builder.Configuration.GetSection(HighlightOptions.SectionName));
+builder.Services.AddSingleton(sp =>
+    HighlightProfile.Load(sp.GetRequiredService<IOptions<HighlightOptions>>().Value));
+
+builder.Services.AddTransient<IConsoleHighlighter>(sp =>
+{
+    // Coloring is a terminal-capability fact, not a consent/security decision —
+    // deliberately not modeled as an IConsentProtocol. NO_COLOR (https://no-color.org)
+    // and redirected output both fall back to the plain-text path unconditionally,
+    // so every call site can call IConsoleHighlighter without an if-check.
+    var colorCapable = !Console.IsOutputRedirected
+        && Environment.GetEnvironmentVariable("NO_COLOR") is null;
+
+    return colorCapable
+        ? new ConsoleHighlighterService(sp.GetRequiredService<HighlightProfile>())
+        : new NullConsoleHighlighter();
+});
 
 builder.Services.AddTransient<ILmStudioClient, LmStudioClient>();
 builder.Services.AddTransient<IClaudeCliClient, ClaudeCliClient>();
@@ -54,6 +73,20 @@ AssistantProfile? assistantProfile = null;
 try
 {
     assistantProfile = host.Services.GetRequiredService<AssistantProfile>();
+}
+catch (InvalidOperationException ex)
+{
+    Console.WriteLine();
+    Console.WriteLine($"[FATAL] {ex.Message}");
+    Environment.Exit(1);
+}
+
+// Fail fast: same posture as AssistantProfile above — no baked-in default
+// theme, so an unconfigured 'Highlight:Theme' stops startup with an
+// actionable message rather than silently disabling color later.
+try
+{
+    host.Services.GetRequiredService<HighlightProfile>();
 }
 catch (InvalidOperationException ex)
 {
@@ -308,19 +341,51 @@ static AskQuestionResultView AskQuestion(IServiceProvider hostProvider, AskQuest
 {
     using IServiceScope serviceScope = hostProvider.CreateScope();
     var controller = serviceScope.ServiceProvider.GetRequiredService<RepositoryController>();
+    var highlighter = serviceScope.ServiceProvider.GetRequiredService<IConsoleHighlighter>();
 
     Console.WriteLine($"\nQuestion: {resourceObject.Question}");
     var result = controller.AskQuestion(resourceObject);
 
     if (!result.Success)
-        Console.WriteLine($"[ERROR] {result.DisplayMessage}");
+    {
+        foreach (var segment in result.Segments.OfType<TextDisplaySegment>())
+            Console.WriteLine($"[ERROR] {segment.Text}");
+    }
     else
-        Console.WriteLine(result.DisplayMessage);
+    {
+        foreach (var segment in result.Segments)
+        {
+            switch (segment)
+            {
+                case TextDisplaySegment text:
+                    Console.Write(text.Text);
+                    break;
+                case ProposalDisplaySegment proposal:
+                    RenderProposalOutcome(proposal.Outcome, highlighter);
+                    break;
+            }
+        }
+        Console.WriteLine();
+    }
 
     foreach (var notice in result.Notices)
         Console.WriteLine($"[NOTICE] {notice}");
 
     return result;
+}
+
+static void RenderProposalOutcome(ProposalOutcomeView outcome, IConsoleHighlighter highlighter)
+{
+    Console.WriteLine(outcome.HeaderLine);
+
+    if (outcome.Status == ProposalStatus.Queued)
+    {
+        var languageId = outcome.LanguageId ?? "plaintext";
+        Console.WriteLine(highlighter.HighlightDiff(outcome.OriginalContent!, outcome.ProposedContent!, languageId));
+    }
+
+    if (outcome.FooterLine is not null)
+        Console.WriteLine(outcome.FooterLine);
 }
 
 static void ScheduleJob(IServiceProvider hostProvider, ScheduleJobRequestObject requestObject)
@@ -336,6 +401,7 @@ static void ReviewPendingWrites(IServiceProvider hostProvider)
 {
     using IServiceScope serviceScope = hostProvider.CreateScope();
     var controller = serviceScope.ServiceProvider.GetRequiredService<FileWriteController>();
+    var highlighter = serviceScope.ServiceProvider.GetRequiredService<IConsoleHighlighter>();
 
     var pending = controller.ListPendingWrites();
     if (pending.Count == 0)
@@ -347,9 +413,12 @@ static void ReviewPendingWrites(IServiceProvider hostProvider)
     Console.WriteLine($"{pending.Count} pending write(s).");
     foreach (var view in pending)
     {
+        var languageId = LanguageMap.Resolve(view.DisplayPath);
+        var coloredDiff = highlighter.HighlightDiff(view.OriginalContent, view.ProposedContent, languageId);
+
         Console.WriteLine($"\n  File  : {view.DisplayPath}");
         Console.WriteLine("--- diff ---");
-        Console.WriteLine(view.Diff);
+        Console.WriteLine(coloredDiff);
         Console.WriteLine("--- end ---");
         Console.Write("Approve write? [y/n]: ");
         var rawAnswer = Console.ReadLine();

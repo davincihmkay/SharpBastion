@@ -8,6 +8,7 @@ using SharpBastion.Interface;
 using SharpBastion.PromptBuilder;
 using SharpBastion.ValueObjects;
 using SharpBastion.Views;
+using Domain_File = SharpBastion.Domain.File;
 using File = SharpBastion.Domain.File;
 
 namespace SharpBastion.Service;
@@ -84,7 +85,7 @@ public class RepositoryIngestorService : IRepositoryIngestorService
         foreach (var file in repository.GetAllFiles())
         {
             var proposedContent = WriteProposalParser.TryExtractContent(response.Message, file.Name);
-            if (proposedContent is null) continue; 
+            if (proposedContent is null) continue;
 
             file.ApplyProposal(proposedContent);
             proposalOutcomes[file.Name] = DescribeOutcome(file.Name, file);
@@ -93,7 +94,7 @@ public class RepositoryIngestorService : IRepositoryIngestorService
                 notices.Add($"{file.Name} already pending review.");
         }
 
-        // Pass 2: new files 
+        // Pass 2: new files
         foreach (var proposedPath in WriteProposalParser.GetProposedPaths(response.Message))
         {
             if (repository.ContainsFile(proposedPath)) continue;
@@ -102,7 +103,7 @@ public class RepositoryIngestorService : IRepositoryIngestorService
 
             if (!PathGuard.IsWithinRoot(repository.Name, absolutePath.Value))
             {
-                proposalOutcomes[proposedPath] = new ProposalOutcomeView(proposedPath, ProposalStatus.Rejected, null);
+                proposalOutcomes[proposedPath] = new ProposalOutcomeView(proposedPath, ProposalStatus.Rejected, null, null, null);
                 continue;
             }
 
@@ -117,22 +118,36 @@ public class RepositoryIngestorService : IRepositoryIngestorService
                 notices.Add($"{newFile.Name} already pending review.");
         }
 
-        var displayMessage = response.Message.ReplaceFileWriteBlocks(DescribeProposalOutcome);
-        return new AskQuestionResultView(true, displayMessage, notices);
+        // Walk the raw response in order, turning each <file_write> marker into
+        // its resolved ProposalOutcomeView and leaving surrounding prose intact —
+        // preserves ordering/readability without ever flattening into one string.
+        var segments = new List<AskDisplaySegment>();
+        foreach (var messageSegment in WriteProposalParser.SplitSegments(response.Message))
+        {
+            if (messageSegment.ProposalPath is null)
+            {
+                if (messageSegment.PlainText.Length > 0)
 
-        // Local function — closes over proposalOutcomes to format and replace file write blocks.
-        string DescribeProposalOutcome(string path) =>
-            proposalOutcomes.TryGetValue(path, out var outcome)
-                ? outcome.ToDisplayText()
-                : $"[FILE WRITE SKIPPED] {path} — not queued.";
+                    segments.Add(new TextDisplaySegment(messageSegment.PlainText));
+                continue;
+            }
+
+            var outcome = proposalOutcomes.TryGetValue(messageSegment.ProposalPath, out var found)
+                ? found
+                : new ProposalOutcomeView(messageSegment.ProposalPath, ProposalStatus.Skipped, null, null, null);
+
+            segments.Add(new ProposalDisplaySegment(outcome));
+        }
+
+        return new AskQuestionResultView(true, segments, notices);
     }
 
     private static ProposalOutcomeView DescribeOutcome(string path, File file)
     {
-        var diff = file.GetPendingWriteDiff();
-        return diff is not null
-            ? new ProposalOutcomeView(path, ProposalStatus.Queued, diff)
-            : new ProposalOutcomeView(path, ProposalStatus.Skipped, null);
+        var pendingWrite = file.GetPendingWrite();
+        return pendingWrite is not null
+            ? new ProposalOutcomeView(path, ProposalStatus.Queued, file.Content, pendingWrite.ProposedContent.Value, LanguageMap.Resolve(path))
+            : new ProposalOutcomeView(path, ProposalStatus.Skipped, null, null, null);
     }
 
     private Repository GetRepository(LocalPath repositoryBasePath, bool isBestPractice)

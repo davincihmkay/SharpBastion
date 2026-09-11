@@ -3,18 +3,18 @@ namespace SharpBastion.Views;
 public class AskQuestionResultView
 {
     public readonly bool Success;
-    public readonly string DisplayMessage;
+    public readonly IReadOnlyList<AskDisplaySegment> Segments;
     public readonly IReadOnlyList<string> Notices;
 
-    public AskQuestionResultView(bool success, string displayMessage, IReadOnlyList<string> notices)
+    public AskQuestionResultView(bool success, IReadOnlyList<AskDisplaySegment> segments, IReadOnlyList<string> notices)
     {
         Success = success;
-        DisplayMessage = displayMessage;
+        Segments = segments;
         Notices = notices;
     }
 
-    public AskQuestionResultView(bool success, string displayMessage)
-        : this(success, displayMessage, Array.Empty<string>())
+    public AskQuestionResultView(bool success, string message)
+        : this(success, new AskDisplaySegment[] { new TextDisplaySegment(message) }, Array.Empty<string>())
     {
     }
 }

@@ -27,7 +27,8 @@ public class FileWriteController
                 return new PendingFileWriteView(
                     pendingWrite.AbsolutePath.Value,
                     file.Name,
-                    file.GetPendingWriteDiff() ?? "(no changes)");
+                    file.Content,
+                    pendingWrite.ProposedContent.Value);
             })
             .ToList();
 

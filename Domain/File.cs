@@ -1,4 +1,3 @@
-using SharpBastion.Helper;
 using SharpBastion.ValueObjects;
 
 namespace SharpBastion.Domain;
@@ -43,13 +42,6 @@ public class File
     public bool HasPendingWrite => _pendingWrite is not null;
 
     public PendingFileWrite? GetPendingWrite() => _pendingWrite;
-
-    public string? GetPendingWriteDiff()
-    {
-        if (_pendingWrite is null) return null;
-
-        return DiffFormatter.BuildUnifiedDiff(_content.Value, _pendingWrite.ProposedContent.Value);
-    }
 
     public void ApplyProposal(FileContent? proposedContent)
     {

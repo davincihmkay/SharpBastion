@@ -1,4 +1,3 @@
-using System.Text;
 using System.Text.RegularExpressions;
 using SharpBastion.ValueObjects;
 
@@ -35,10 +34,22 @@ public static class WriteProposalParser
         return new FileContent(content);
     }
 
-    public static string ReplaceFileWriteBlocks(this Message llmResponse, Func<string, string> buildReplacement)
+    /// <summary>
+    /// One ordered chunk of a raw LLM response: either a run of plain prose
+    /// (ProposalPath is null, PlainText is the prose) or a marker for a
+    /// &lt;file_write path="..."&gt; block found at this position (PlainText is
+    /// empty, ProposalPath is the path attribute). Used by
+    /// RepositoryIngestorService to build an AskQuestionResultView's Segments.
+    /// Replaces the old ReplaceFileWriteBlocks, which concatenated everything
+    /// into a single string and so couldn't let the CLI colorize just the
+    /// diff portions independently of the surrounding prose.
+    /// </summary>
+    public readonly record struct MessageSegment(string PlainText, string? ProposalPath);
+
+    public static IReadOnlyList<MessageSegment> SplitSegments(Message llmResponse)
     {
         var text = llmResponse.Value;
-        var sb = new StringBuilder();
+        var segments = new List<MessageSegment>();
         var pos = 0;
 
         while (true)
@@ -46,7 +57,8 @@ public static class WriteProposalParser
             var openMatch = OpenTagPattern.Match(text, pos);
             if (!openMatch.Success)
             {
-                sb.Append(text, pos, text.Length - pos);
+                if (pos < text.Length)
+                    segments.Add(new MessageSegment(text[pos..], null));
                 break;
             }
 
@@ -56,17 +68,19 @@ public static class WriteProposalParser
             {
                 // Unterminated block — keep the rest of the raw text rather than
                 // silently truncating the displayed response.
-                sb.Append(text, pos, text.Length - pos);
+                segments.Add(new MessageSegment(text[pos..], null));
                 break;
             }
 
-            sb.Append(text, pos, openMatch.Index - pos);
-            sb.Append(buildReplacement(openMatch.Groups["path"].Value));
+            if (openMatch.Index > pos)
+                segments.Add(new MessageSegment(text[pos..openMatch.Index], null));
+
+            segments.Add(new MessageSegment(string.Empty, openMatch.Groups["path"].Value));
 
             pos = closePos + CloseTag.Length;
         }
 
-        return sb.ToString();
+        return segments;
     }
 
     private static int FindMatchingCloseTag(string text, int searchFrom)
