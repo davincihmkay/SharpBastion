@@ -1,3 +1,4 @@
+using System.Text;
 using System.Text.RegularExpressions;
 using SharpBastion.ValueObjects;
 
@@ -32,6 +33,40 @@ public static class WriteProposalParser
 
         var content = text.Substring(contentStart, closePos - contentStart).Trim();
         return new FileContent(content);
+    }
+
+    public static string ReplaceFileWriteBlocks(this Message llmResponse, Func<string, string> buildReplacement)
+    {
+        var text = llmResponse.Value;
+        var sb = new StringBuilder();
+        var pos = 0;
+
+        while (true)
+        {
+            var openMatch = OpenTagPattern.Match(text, pos);
+            if (!openMatch.Success)
+            {
+                sb.Append(text, pos, text.Length - pos);
+                break;
+            }
+
+            var contentStart = openMatch.Index + openMatch.Length;
+            var closePos = FindMatchingCloseTag(text, contentStart);
+            if (closePos == -1)
+            {
+                // Unterminated block — keep the rest of the raw text rather than
+                // silently truncating the displayed response.
+                sb.Append(text, pos, text.Length - pos);
+                break;
+            }
+
+            sb.Append(text, pos, openMatch.Index - pos);
+            sb.Append(buildReplacement(openMatch.Groups["path"].Value));
+
+            pos = closePos + CloseTag.Length;
+        }
+
+        return sb.ToString();
     }
 
     private static int FindMatchingCloseTag(string text, int searchFrom)

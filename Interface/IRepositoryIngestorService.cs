@@ -6,5 +6,5 @@ namespace SharpBastion.Interface;
 public interface IRepositoryIngestorService
 {
     OperationResultView IngestRepositories(IngestRepositoriesCommand command);
-    OperationResultView AskQuestion(AskRepositoryQuestionCommand command);
+    AskQuestionResultView AskQuestion(AskRepositoryQuestionCommand command);
 }

@@ -20,7 +20,7 @@ public class RepositoryController
         return _repositoryIngestorService.IngestRepositories(command);
     }
     
-    public OperationResultView AskQuestion(AskQuestionRequestObject requestObject)
+    public AskQuestionResultView AskQuestion(AskQuestionRequestObject requestObject)
     {
         var command = AskRepositoryQuestionCommand.PopulateFromRequestObject(requestObject);
         return _repositoryIngestorService.AskQuestion(command);
