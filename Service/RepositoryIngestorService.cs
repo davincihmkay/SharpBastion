@@ -8,7 +8,6 @@ using SharpBastion.Interface;
 using SharpBastion.PromptBuilder;
 using SharpBastion.ValueObjects;
 using SharpBastion.Views;
-using Domain_File = SharpBastion.Domain.File;
 using File = SharpBastion.Domain.File;
 
 namespace SharpBastion.Service;
@@ -65,58 +64,75 @@ public class RepositoryIngestorService : IRepositoryIngestorService
         return new OperationResultView(success, message);
     }
 
-    public OperationResultView AskQuestion(AskRepositoryQuestionCommand command)
+    public AskQuestionResultView AskQuestion(AskRepositoryQuestionCommand command)
     {
         var repository = _cachedRepositories.SingleOrDefault(x => x.Name == command.RepositoryName.Value);
         if (repository == null)
-            return new OperationResultView(false, $"Repository '{command.RepositoryName.Value}' not found. Ingest it first.");
+            return new AskQuestionResultView(false, $"Repository '{command.RepositoryName.Value}' not found. Ingest it first.");
 
         var lastResponse = repository.GetLastRespone();
         if (lastResponse == null)
-            return new OperationResultView(false, $"Repository '{command.RepositoryName.Value}' has no prior response — not ingested most likely.");
+            return new AskQuestionResultView(false, $"Repository '{command.RepositoryName.Value}' has no prior response — not ingested most likely.");
 
         var response = _repositoryDomainService.AskQuestion(command.Question, lastResponse, repository.TempDirectory);
         repository.AddResponse(response);
+
+        var proposalOutcomes = new Dictionary<string, ProposalOutcomeView>(StringComparer.OrdinalIgnoreCase);
+        var notices = new List<string>();
 
         // Pass 1: existing files
         foreach (var file in repository.GetAllFiles())
         {
             var proposedContent = WriteProposalParser.TryExtractContent(response.Message, file.Name);
+            if (proposedContent is null) continue; 
+
             file.ApplyProposal(proposedContent);
-            if (file.HasPendingWrite)
-            {
-                var enqueued = _pendingWriteQueue.Enqueue(file);
-                if (!enqueued)
-                    Console.WriteLine($"[SKIP] {file.Name} already pending review.");
-            }
+            proposalOutcomes[file.Name] = DescribeOutcome(file.Name, file);
+
+            if (file.HasPendingWrite && !_pendingWriteQueue.Enqueue(file))
+                notices.Add($"{file.Name} already pending review.");
         }
 
-        // Pass 2: new files — repository determines existence, File owns proposal application.
-        // Attached to the repository's tree immediately (regardless of eventual approve/reject)
-        // so later ask/review cycles treat this path as an existing, trackable file instead of
-        // re-running this branch — and re-diffing against an empty baseline — indefinitely.
+        // Pass 2: new files 
         foreach (var proposedPath in WriteProposalParser.GetProposedPaths(response.Message))
         {
             if (repository.ContainsFile(proposedPath)) continue;
 
             var absolutePath = new LocalPath(Path.Combine(repository.Name, proposedPath));
 
-            if (!PathGuard.IsWithinRoot(repository.Name, absolutePath.Value)) continue;
+            if (!PathGuard.IsWithinRoot(repository.Name, absolutePath.Value))
+            {
+                proposalOutcomes[proposedPath] = new ProposalOutcomeView(proposedPath, ProposalStatus.Rejected, null);
+                continue;
+            }
 
             var newFile = new File(proposedPath, absolutePath, new FileContent(string.Empty));
             repository.AttachNewFile(newFile);
 
             var proposedContent = WriteProposalParser.TryExtractContent(response.Message, proposedPath);
             newFile.ApplyProposal(proposedContent);
-            if (newFile.HasPendingWrite)
-            {
-                var enqueued = _pendingWriteQueue.Enqueue(newFile);
-                if (!enqueued)
-                    Console.WriteLine($"[SKIP] {newFile.Name} already pending review.");
-            }
+            proposalOutcomes[proposedPath] = DescribeOutcome(proposedPath, newFile);
+
+            if (newFile.HasPendingWrite && !_pendingWriteQueue.Enqueue(newFile))
+                notices.Add($"{newFile.Name} already pending review.");
         }
 
-        return new OperationResultView(true, repository.GetLastRespone().Message.Value);
+        var displayMessage = response.Message.ReplaceFileWriteBlocks(DescribeProposalOutcome);
+        return new AskQuestionResultView(true, displayMessage, notices);
+
+        // Local function — closes over proposalOutcomes to format and replace file write blocks.
+        string DescribeProposalOutcome(string path) =>
+            proposalOutcomes.TryGetValue(path, out var outcome)
+                ? outcome.ToDisplayText()
+                : $"[FILE WRITE SKIPPED] {path} — not queued.";
+    }
+
+    private static ProposalOutcomeView DescribeOutcome(string path, File file)
+    {
+        var diff = file.GetPendingWriteDiff();
+        return diff is not null
+            ? new ProposalOutcomeView(path, ProposalStatus.Queued, diff)
+            : new ProposalOutcomeView(path, ProposalStatus.Skipped, null);
     }
 
     private Repository GetRepository(LocalPath repositoryBasePath, bool isBestPractice)
@@ -215,7 +231,7 @@ public class RepositoryIngestorService : IRepositoryIngestorService
             return null;
         }
     }
-    
+
     private static string ToRelativePath(string absolutePath, string repositoryBasePath)
     {
         var relative = Path.GetRelativePath(repositoryBasePath, absolutePath)

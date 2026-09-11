@@ -304,14 +304,22 @@ static OperationResultView IngestRepository(IServiceProvider hostProvider, strin
     return controller.IngestRepositories(request);
 }
 
-static OperationResultView AskQuestion(IServiceProvider hostProvider, AskQuestionRequestObject resourceObject)
+static AskQuestionResultView AskQuestion(IServiceProvider hostProvider, AskQuestionRequestObject resourceObject)
 {
     using IServiceScope serviceScope = hostProvider.CreateScope();
     var controller = serviceScope.ServiceProvider.GetRequiredService<RepositoryController>();
 
     Console.WriteLine($"\nQuestion: {resourceObject.Question}");
     var result = controller.AskQuestion(resourceObject);
-    Console.WriteLine(result.Message);
+
+    if (!result.Success)
+        Console.WriteLine($"[ERROR] {result.DisplayMessage}");
+    else
+        Console.WriteLine(result.DisplayMessage);
+
+    foreach (var notice in result.Notices)
+        Console.WriteLine($"[NOTICE] {notice}");
+
     return result;
 }
 
