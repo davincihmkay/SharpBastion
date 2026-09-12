@@ -30,3 +30,12 @@ Note: SharpBastion invokes Claude CLI non-interactively (`--print`, JSON
 output, no TTY) as a subprocess. This is a programmatic/automated usage
 pattern — confirm it is permitted under Anthropic's terms of service for
 your account and use case before enabling the Claude CLI fallback.
+
+Note: SharpBastion's Kagi integration (Client/KagiClient.cs) calls the Kagi
+Search API directly via HttpClient (POST https://kagi.com/api/v0/search),
+authenticating with an API key supplied through the 'KAGI_API_KEY'
+environment variable. Search queries are only ever those the model itself
+proposes via a <kagi_search> tag, gated by IKagiSearchProtocol — see
+README.md's Architecture > Protocols section. Confirm your Kagi account's
+terms permit this usage pattern before overriding the protocol for unattended
+execution.
