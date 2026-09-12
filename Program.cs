@@ -36,6 +36,11 @@ builder.Services.AddTransient<IFileWriterService, FileWriterService>();
 builder.Services.AddTransient<IPendingWriteExecutionService, PendingWriteExecutionService>();
 builder.Services.AddTransient<FileWriteController>();
 
+builder.Services.AddTransient<IKagiClient, KagiClient>();
+builder.Services.AddSingleton<IKagiSearchProtocol, KagiSearchProtocol>();
+builder.Services.AddSingleton<PendingKagiSearchQueue>();
+builder.Services.AddTransient<KagiSearchController>();
+
 builder.Services.AddTransient<IPythonScriptClient, PythonScriptClient>();
 builder.Services.AddSingleton<IScriptExecutionProtocol, ScriptExecutionProtocol>();
 builder.Services.AddSingleton<IJobSchedulerService, JobSchedulerService>();
@@ -64,6 +69,7 @@ catch (InvalidOperationException ex)
 
 ResolveConsent(host.Services.GetRequiredService<IExternalLlmProtocol>());
 ResolveConsent(host.Services.GetRequiredService<IScriptExecutionProtocol>());
+ResolveConsent(host.Services.GetRequiredService<IKagiSearchProtocol>());
 
 // Start hosted services (the scheduled-job timer) before entering the
 // blocking interactive loop below. RunInteractiveLoop never returns
@@ -165,9 +171,13 @@ static void RunInteractiveLoop(IServiceProvider hostProvider, AssistantProfile a
                         RepositoryName = activeRepo
                     });
 
-                    var queue = hostProvider.GetRequiredService<PendingWriteQueue>();
-                    if (queue.Count > 0)
-                        Console.WriteLine($"\n{queue.Count} pending write(s) queued. Type 'review' to approve or reject.");
+                    var writeQueue = hostProvider.GetRequiredService<PendingWriteQueue>();
+                    if (writeQueue.Count > 0)
+                        Console.WriteLine($"\n{writeQueue.Count} pending write(s) queued. Type 'review' to approve or reject.");
+
+                    var kagiQueue = hostProvider.GetRequiredService<PendingKagiSearchQueue>();
+                    if (kagiQueue.Count > 0)
+                        Console.WriteLine($"{kagiQueue.Count} pending search(es) queued. Type 'review' to approve or reject.");
                 }
                 catch (Exception ex)
                 {
@@ -213,6 +223,7 @@ static void RunInteractiveLoop(IServiceProvider hostProvider, AssistantProfile a
                 {
                     ReviewPendingWrites(hostProvider);
                     ReviewPendingJobRuns(hostProvider);
+                    ReviewPendingKagiSearches(hostProvider);
                 }
                 catch (Exception ex)
                 {
@@ -400,5 +411,46 @@ static void ReviewPendingJobRuns(IServiceProvider hostProvider)
             ScriptName = view.ScriptName,
             Approve = answer == "y"
         }).Message);
+    }
+}
+
+static void ReviewPendingKagiSearches(IServiceProvider hostProvider)
+{
+    using IServiceScope serviceScope = hostProvider.CreateScope();
+    var controller = serviceScope.ServiceProvider.GetRequiredService<KagiSearchController>();
+
+    var pending = controller.ListPendingSearches();
+    if (pending.Count == 0)
+    {
+        Console.WriteLine("No pending searches.");
+        return;
+    }
+
+    Console.WriteLine($"{pending.Count} pending search(es).");
+    foreach (var view in pending)
+    {
+        Console.WriteLine($"\n  Query : {view.Query}");
+        Console.Write("Approve search? [y/n]: ");
+        var rawAnswer = Console.ReadLine();
+        if (rawAnswer is null)
+        {
+            AbortNonInteractive();
+        }
+
+        var answer = rawAnswer!.Trim().ToLower();
+
+        var result = controller.ResolveSearch(new ResolveKagiSearchRequestObject
+        {
+            Id = view.Id,
+            Approve = answer == "y"
+        });
+
+        if (!result.Success)
+            Console.WriteLine($"[ERROR] {result.DisplayMessage}");
+        else
+            Console.WriteLine(result.DisplayMessage);
+
+        foreach (var notice in result.Notices)
+            Console.WriteLine($"[NOTICE] {notice}");
     }
 }

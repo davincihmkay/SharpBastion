@@ -7,4 +7,5 @@ public interface IRepositoryIngestorService
 {
     OperationResultView IngestRepositories(IngestRepositoriesCommand command);
     AskQuestionResultView AskQuestion(AskRepositoryQuestionCommand command);
+    AskQuestionResultView ResolveKagiSearch(ResolveKagiSearchCommand command);
 }

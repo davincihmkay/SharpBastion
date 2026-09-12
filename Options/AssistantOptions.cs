@@ -21,4 +21,16 @@ public class AssistantOptions
 
     /// <summary>Backend model identifier passed to the LLM client (e.g. LmStudio).</summary>
     public string ModelName { get; set; } = string.Empty;
+
+    /// <summary>
+    /// Max number of automatic Kagi search round-trips (search executed → results
+    /// fed back → model replies) SharpBastion will auto-chain within a single
+    /// ask/search-resolution call while IKagiSearchProtocol is overridden. Once the
+    /// budget is spent mid-chain, further proposals fall back to the safe default —
+    /// queued in PendingKagiSearchQueue for manual 'review' — rather than continuing
+    /// unattended. Has no effect while the protocol is not overridden: every
+    /// proposal is already queued for manual review in that state, uncapped.
+    /// Defaults to 3 when unset.
+    /// </summary>
+    public int KagiSearchMaxRoundTrips { get; set; } = 3;
 }
