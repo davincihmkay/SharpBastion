@@ -6,6 +6,7 @@ using SharpBastion.Client;
 using SharpBastion.Controller;
 using SharpBastion.Domain;
 using SharpBastion.DomainService;
+using SharpBastion.Helper;
 using SharpBastion.Interface;
 using SharpBastion.Options;
 using SharpBastion.Protocol;
@@ -51,10 +52,6 @@ builder.Services.AddHostedService<ScheduledJobRunnerHostedService>();
 
 using IHost host = builder.Build();
 
-// Fail fast: resolves and validates the assistant persona/model configuration
-// before any consent prompts or interactive input. AssistantProfile.Load throws
-// with an actionable message if the system-prompt file or model name is missing,
-// unreadable, or empty — there is no embedded fallback persona.
 AssistantProfile? assistantProfile = null;
 try
 {
@@ -71,11 +68,6 @@ ResolveConsent(host.Services.GetRequiredService<IExternalLlmProtocol>());
 ResolveConsent(host.Services.GetRequiredService<IScriptExecutionProtocol>());
 ResolveConsent(host.Services.GetRequiredService<IKagiSearchProtocol>());
 
-// Start hosted services (the scheduled-job timer) before entering the
-// blocking interactive loop below. RunInteractiveLoop never returns
-// (only Environment.Exit does), so the previous placement of
-// `await host.RunAsync()` after it was unreachable — hosted services
-// never actually started.
 await host.StartAsync();
 
 RunInteractiveLoop(host.Services, assistantProfile!);
@@ -137,17 +129,23 @@ static void RunInteractiveLoop(IServiceProvider hostProvider, AssistantProfile a
         {
             case "ingest":
             {
-                var path = ResolvePath(argument, homepath);
-                if (path is null) { Console.WriteLine("Usage: ingest <path>  (or just 'ingest' to use ~/git/SharpBastion)"); break; }
+                var paths = ResolveIngestPaths(argument, homepath, assistantProfile.WorkspaceRoot);
+                if (paths is null || paths.Count == 0)
+                {
+                    Console.WriteLine("Usage: ingest <path>[,<path>...]  (or just 'ingest' to pick from the configured workspace root)");
+                    break;
+                }
 
-                Console.WriteLine($"Ingesting: {path}");
+                Console.WriteLine($"Ingesting: {string.Join(", ", paths)}");
                 try
                 {
-                    var result = IngestRepository(hostProvider, path);
+                    var result = IngestRepository(hostProvider, paths);
                     Console.WriteLine(result.Message);
-                    if (result.Success)
+
+                    var firstIngestedRepository = result.IngestedRepositoryPaths.FirstOrDefault();
+                    if (firstIngestedRepository is not null)
                     {
-                        activeRepo = path;
+                        activeRepo = firstIngestedRepository;
                         Console.WriteLine($"Active repo set to: {activeRepo}");
                     }
                 }
@@ -271,6 +269,54 @@ static string? ResolvePath(string? input, string homepath)
         : input;
 }
 
+static List<string>? ResolveIngestPaths(string? argument, string homepath, string workspaceRoot)
+{
+    if (argument is not null)
+    {
+        return argument.Split(',', StringSplitOptions.RemoveEmptyEntries)
+            .Select(p => p.Trim())
+            .Where(p => p.Length > 0)
+            .Select(p => ResolvePath(p, homepath)!)
+            .ToList();
+    }
+
+    var candidates = RepositoryDiscovery.ListCandidates(workspaceRoot);
+    if (candidates.Count == 0)
+    {
+        Console.WriteLine($"No repositories found under configured workspace root: {workspaceRoot}");
+        return null;
+    }
+
+    Console.WriteLine($"Repositories under {workspaceRoot}:");
+    for (var i = 0; i < candidates.Count; i++) 
+        Console.WriteLine($"  {i + 1}. {Path.GetFileName(candidates[i])}");
+
+    Console.Write("Select repositories (comma-separated indices, e.g. 1,3): ");
+    var rawSelection = Console.ReadLine();
+    if (rawSelection is null)
+    {
+        AbortNonInteractive();
+    }
+
+    var selected = new List<string>();
+    foreach (var token in rawSelection!.Split(',', StringSplitOptions.RemoveEmptyEntries))
+    {
+        if (int.TryParse(token.Trim(), out var index) && index >= 1 && index <= candidates.Count)
+        {
+            selected.Add(candidates[index - 1]);
+        }
+        else
+        {
+            Console.WriteLine($"[SKIP] '{token.Trim()}' is not a valid selection — ignored.");
+        }
+    }
+
+    if (selected.Count == 0)
+        Console.WriteLine("No repositories selected.");
+
+    return selected;
+}
+
 static void PrintHelp(string name)
 {
     // Box art is static; only the title is derived at runtime — from the
@@ -301,7 +347,7 @@ static void PrintHelp(string name)
     Console.WriteLine(bottom);
 }
 
-static OperationResultView IngestRepository(IServiceProvider hostProvider, string path)
+static IngestRepositoriesResultView IngestRepository(IServiceProvider hostProvider, List<string> paths)
 {
     using IServiceScope serviceScope = hostProvider.CreateScope();
     var controller = serviceScope.ServiceProvider.GetRequiredService<RepositoryController>();
@@ -309,7 +355,7 @@ static OperationResultView IngestRepository(IServiceProvider hostProvider, strin
     var request = new IngestRepositoriesRequestObject
     {
         IsBesPractice = true,
-        Paths = new List<string> { path }
+        Paths = paths
     };
 
     return controller.IngestRepositories(request);

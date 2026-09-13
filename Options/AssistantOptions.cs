@@ -23,6 +23,20 @@ public class AssistantOptions
     public string ModelName { get; set; } = string.Empty;
 
     /// <summary>
+    /// Root directory SharpBastion discovers and resolves repositories under —
+    /// backs `RepomixCliClient`'s invocation root and the `ingest` command's
+    /// no-argument discovery flow. May be absolute, or `~/`-prefixed (expanded
+    /// against the current user's home directory). Deliberately has no implicit
+    /// default: a silent fallback to some hardcoded location would mean
+    /// discovery and repository packaging point at a real filesystem path
+    /// nobody explicitly configured, which runs against this project's
+    /// privacy-by-explicit-configuration posture (see README's Core
+    /// principles). AssistantProfile.Load fails fast — refusing to start —
+    /// if this is unset or resolves to a directory that does not exist.
+    /// </summary>
+    public string WorkspaceRoot { get; set; } = string.Empty;
+
+    /// <summary>
     /// Max number of automatic Kagi search round-trips (search executed → results
     /// fed back → model replies) SharpBastion will auto-chain within a single
     /// ask/search-resolution call while IKagiSearchProtocol is overridden. Once the

@@ -54,6 +54,8 @@ CLI (Program.cs)
 
 **Scheduled job flow:** `schedule <script.py> <interval>` registers a job (must resolve inside `Scripts/`, must be a `.py` file). A background timer checks all registered jobs every 30 seconds. A due job either runs immediately or is queued in `PendingJobRunQueue`. See Protocols below for which applies and when. Job state, meaning registrations and their next-run times, lives only in memory for the current process.
 
+**Repository discovery:** `ingest` run with no argument lists candidate repositories under the configured `Assistant:WorkspaceRoot` (every top-level subdirectory, excluding dot-prefixed ones such as `.git`, `.vscode`, `.idea` — no requirement that it be a Git repository, since Repomix packages a wide range of project layouts, not just Git repositories) and lets you pick which to ingest by index. `ingest <path>` still ingests a single path directly, and `ingest <path>,<path>,...` ingests several in one call — all three converge on the same batch-ingestion call, so partial failures are reported the same way regardless of which form triggered it.
+
 **Protocols:** Behaviours with security or privacy impact are mediated by explicit protocol objects rather than ad-hoc checks. A protocol is a component the system consults before acting; it is never assumed, never bypassed, and never implicit.
 
 - `IExternalLlmProtocol` — gates routing of repository content to any non-local LLM backend. Defaults to `IsOverridden = false`. Until explicitly overridden via `OverrideProtocol()`, `RepositoryDomainService` refuses to fall back to Claude CLI even when LmStudio is offline, throwing `InvalidOperationException` instead of silently exfiltrating data. The override is per-process and is requested at startup (see [Startup protocol prompts](#usage)).
@@ -63,6 +65,7 @@ CLI (Program.cs)
 - `PendingJobRunQueue` — gates unattended-disabled job execution the same way: one pending entry per job id, skip-and-log (not stacked) if a prior due occurrence for that job hasn't been reviewed yet.
 - `PendingKagiSearchQueue` — gates execution of any Kagi search proposed by the model, the same shape as `PendingWriteQueue`/`PendingJobRunQueue`: one pending entry per proposal, skip-and-log (not stacked) if an identical (repository, query) pair is already pending.
 - Path-traversal guard — `RepositoryIngestorService.IsWithinRoot` enforces that every proposed write target resolves strictly inside the ingested repository root, independent of what the model returns. Allowed file extensions and filenames are likewise an explicit allowlist on `Domain.File`. `Domain.ScheduledJob` applies the equivalent guard for scheduled scripts: only `.py` files resolving inside the process's own `Scripts/` directory may be registered. `ValueObjects.KagiQuery` applies the equivalent guard for search proposals: non-empty and length-capped.
+- `Assistant:WorkspaceRoot` — the root repository discovery and Repomix packaging both operate under. Has no implicit default; `AssistantProfile.Load` refuses to start rather than assume a location nobody explicitly configured. See [Configuration](#configuration).
 
 The pattern is uniform: each protocol has a single, inspectable point of enforcement, and every external-facing or autonomous-facing action passes through one.
 
@@ -103,7 +106,7 @@ npm install -g repomix
 cp appsettings.example.json appsettings.json
 cp Config/system-prompt.example.md Config/my-assistant.md
 ```
-Edit `appsettings.json`'s `Assistant:SystemPromptPath` to reference the file you just created (e.g. `Config/my-assistant.md`), and edit that file's contents to define your assistant's persona. See [Configuration](#configuration) for the full set of options.
+Edit `appsettings.json`'s `Assistant:SystemPromptPath` to reference the file you just created (e.g. `Config/my-assistant.md`), and edit that file's contents to define your assistant's persona. Also set `Assistant:WorkspaceRoot` to the directory containing the repositories you intend to ingest (e.g. `~/git`) — SharpBastion refuses to start without it. If your persona file contains the literal token `{{WORKSPACE_ROOT}}`, it is substituted with this resolved path at load time. See [Configuration](#configuration) for the full set of options.
 
 **4. (Optional) Authenticate Claude CLI**
 
@@ -133,6 +136,8 @@ dotnet build
 |---|---|---|
 | `CLAUDE_CLI_PATH` | `~/.local/bin/claude` (Linux/macOS), `claude` (Windows) | Path to the Claude CLI binary |
 | `KAGI_API_KEY` | *(none — required only if a response proposes a `<kagi_search>`)* | Kagi API key used by `KagiClient` to authenticate search requests. Read once at process start; never sourced from `appsettings.json` and never logged. |
+
+`Assistant:WorkspaceRoot` (or the `Assistant__WorkspaceRoot` environment variable) sets the directory SharpBastion discovers and resolves repositories under — it backs both `RepomixCliClient`'s invocation root and the `ingest` command's no-argument discovery flow (see [Usage](#usage)). Accepts an absolute path or a `~/`-prefixed one (expanded against the current user's home directory). Unlike the environment variables above, this is bound through the `Assistant` options section rather than read directly, so it can be pinned per-clone in `appsettings.json` and still overridden per-session via `Assistant__WorkspaceRoot`. There is no default: SharpBastion fails fast at startup if it is unset, or if it resolves to a directory that does not exist — a silent fallback location would run against this project's privacy-by-explicit-configuration posture (see Core principles above). If the loaded system-prompt file contains the literal token `{{WORKSPACE_ROOT}}`, it is substituted with this resolved path.
 
 `Assistant:KagiSearchMaxRoundTrips` (or the `Assistant__KagiSearchMaxRoundTrips` environment variable) caps how many auto-approved search→reply hops `IKagiSearchProtocol`, once overridden, will chain unattended within a single `ask`/search-resolution call. Defaults to `3`; must be a positive integer if set explicitly — see [`appsettings.example.json`](./appsettings.example.json).
 
@@ -183,17 +188,20 @@ All three gates are enforced by their respective protocol objects and are intent
 **CLI commands**
 
 ```
-ingest <path>         Ingest a repository and send its contents to the LLM
-use <path>            Switch the active repository without re-ingesting
-ask <question>        Ask a question about the active repository
-schedule <s> <i>      Schedule a Scripts/*.py job on a fixed interval (e.g. schedule downloadDailyBarcelonaPdf.py 24h)
-review                Interactively approve or reject pending file writes, job runs, and searches
-status                Display the currently active repository
-help                  Show this command list
-exit / quit           Shut down
+ingest <path>[,<path>...]  Ingest one or more repositories and send their contents to the LLM
+ingest                     Discover repositories under Assistant:WorkspaceRoot and pick which to ingest
+use <path>                 Switch the active repository without re-ingesting
+ask <question>             Ask a question about the active repository
+schedule <s> <i>           Schedule a Scripts/*.py job on a fixed interval (e.g. schedule downloadDailyBarcelonaPdf.py 24h)
+review                     Interactively approve or reject pending file writes, job runs, and searches
+status                     Display the currently active repository
+help                       Show this command list
+exit / quit                Shut down
 ```
 
 Interval format for `schedule` is a plain duration: a number followed by `s`, `m`, `h`, or `d` (seconds/minutes/hours/days) — e.g. `30m`, `24h`, `2d`. No cron expressions.
+
+`ingest` accepting more than one path always ingests each independently and reports success/failure per path; the active repository afterward is the *first path that actually succeeded*, in request order — not necessarily the first path you typed, if an earlier one in the list failed.
 
 **Example session**
 ```
@@ -216,6 +224,18 @@ coolassistant> review
 --- end ---
 Approve write? [y/n]: y
 Written: /home/user/git/MyProject/Program.cs
+```
+
+**Example discovery session**
+```
+coolassistant> ingest
+Repositories under /home/user/git:
+  1. /home/user/git/MyProject
+  2. /home/user/git/OtherProject
+Select repositories (comma-separated indices, e.g. 1,3): 1,2
+Ingesting: /home/user/git/MyProject, /home/user/git/OtherProject
+Successfully ingested repositories: /home/user/git/MyProject, /home/user/git/OtherProject
+Active repo set to: /home/user/git/MyProject
 ```
 
 **Supported file types for write proposals**

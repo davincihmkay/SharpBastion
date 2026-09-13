@@ -46,9 +46,9 @@ public class RepositoryIngestorService : IRepositoryIngestorService
         _cachedRepositories = new List<Repository>();
     }
 
-    public OperationResultView IngestRepositories(IngestRepositoriesCommand command)
+    public IngestRepositoriesResultView IngestRepositories(IngestRepositoriesCommand command)
     {
-        var succeeded = new List<string>();
+        var ingestedRepositories = new List<string>();
         var failed = new List<(string Path, string Reason)>();
 
         foreach (var path in command.RepositoryPaths)
@@ -62,7 +62,7 @@ public class RepositoryIngestorService : IRepositoryIngestorService
                     repository.AddResponse(response);
 
                 _cachedRepositories.Add(repository);
-                succeeded.Add(path.Value);
+                ingestedRepositories.Add(path.Value);
             }
             catch (Exception ex)
             {
@@ -72,11 +72,11 @@ public class RepositoryIngestorService : IRepositoryIngestorService
 
         var success = failed.Count == 0;
         var message = success
-            ? $"Successfully ingested repositories: {string.Join(", ", succeeded)}"
-            : $"Ingested {succeeded.Count}/{command.RepositoryPaths.Count} repositories. " +
+            ? $"Successfully ingested repositories: {string.Join(", ", ingestedRepositories)}"
+            : $"Ingested {ingestedRepositories.Count}/{command.RepositoryPaths.Count} repositories. " +
               $"Failed: {string.Join("; ", failed.Select(f => $"{f.Path} ({f.Reason})"))}";
 
-        return new OperationResultView(success, message);
+        return new IngestRepositoriesResultView(success, message, ingestedRepositories);
     }
 
     public AskQuestionResultView AskQuestion(AskRepositoryQuestionCommand command)

@@ -3,6 +3,7 @@ using System.Xml.Serialization;
 using SharpBastion.ClientRequestObject;
 using SharpBastion.ClientResponseObject;
 using SharpBastion.Interface;
+using SharpBastion.Options;
 
 namespace SharpBastion.Client;
 
@@ -11,15 +12,15 @@ public class RepomixCliClient : IRepomixCliClient
     private static readonly string _homepath =
         Environment.GetFolderPath(Environment.SpecialFolder.UserProfile);
 
-    private static readonly string _gitPath =
-        Path.Combine(_homepath, "git");
-
     private static readonly string _sharpBastionHomeDir =
         Path.Combine(_homepath, ".sharpbastion");
 
-    public RepomixCliClient()
+    private readonly string _workspaceRoot;
+
+    public RepomixCliClient(AssistantProfile assistantProfile)
     {
         Directory.CreateDirectory(_sharpBastionHomeDir);
+        _workspaceRoot = assistantProfile.WorkspaceRoot;
     }
 
     public async Task<RepomixCliClientPackageRepositoryResponseObject> PackageRepositoryToXml(
@@ -65,12 +66,12 @@ public class RepomixCliClient : IRepomixCliClient
         return result;
     }
 
-    private static ProcessStartInfo GetProcessStartInfo(string path, string outputFile)
+    private ProcessStartInfo GetProcessStartInfo(string path, string outputFile)
     {
         var psi = new ProcessStartInfo
         {
             FileName = "repomix",
-            WorkingDirectory = _gitPath,
+            WorkingDirectory = _workspaceRoot,
             UseShellExecute = false,
             RedirectStandardOutput = false,
             RedirectStandardError = true,
