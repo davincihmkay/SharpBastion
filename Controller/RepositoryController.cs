@@ -14,7 +14,7 @@ public class RepositoryController
         _repositoryIngestorService = repositoryIngestorService;   
     }
     
-    public OperationResultView IngestRepositories(IngestRepositoriesRequestObject requestObject)
+    public IngestRepositoriesResultView IngestRepositories(IngestRepositoriesRequestObject requestObject)
     {
         var command = IngestRepositoriesCommand.PopulateFromRequestObject(requestObject);
         return _repositoryIngestorService.IngestRepositories(command);
