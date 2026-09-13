@@ -35,10 +35,13 @@ public class RepositoryDomainService : IRepositoryDomainService
         foreach (var message in messages)
         {
             string responseId = lastResponse?.Id.Value;
+            var isFirstTurn = responseId is null;
 
             if (_lmStudioClient.IsOnline().ConfigureAwait(false).GetAwaiter().GetResult())
             {
-                var requestObject = new LmStudioClientChatPromptClientRequestObject(_modelName, _systemPrompt, message.Value, responseId);
+                var requestObject = isFirstTurn
+                    ? new LmStudioClientChatPromptClientRequestObject(_modelName, _systemPrompt, message.Value, responseId)
+                    : new LmStudioClientChatPromptClientRequestObject(_modelName, message.Value, responseId);
                 var responseObject = _lmStudioClient.SendMessageData(requestObject);
 
                 var lastResponseId = new ResponseId(responseObject.response_id);
