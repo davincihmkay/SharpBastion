@@ -288,8 +288,8 @@ static List<string>? ResolveIngestPaths(string? argument, string homepath, strin
     }
 
     Console.WriteLine($"Repositories under {workspaceRoot}:");
-    for (var i = 0; i < candidates.Count; i++)
-        Console.WriteLine($"  {i + 1}. {candidates[i]}");
+    for (var i = 0; i < candidates.Count; i++) 
+        Console.WriteLine($"  {i + 1}. {Path.GetFileName(candidates[i])}");
 
     Console.Write("Select repositories (comma-separated indices, e.g. 1,3): ");
     var rawSelection = Console.ReadLine();
