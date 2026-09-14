@@ -54,6 +54,8 @@ CLI (Program.cs)
 
 **Scheduled job flow:** `schedule <script.py> <interval>` registers a job (must resolve inside `Scripts/`, must be a `.py` file). A background timer checks all registered jobs every 30 seconds. A due job either runs immediately or is queued in `PendingJobRunQueue`. See Protocols below for which applies and when. Job state, meaning registrations and their next-run times, lives only in memory for the current process.
 
+**Session-listen flow:** `listen` lets one running Bastion process observe another's console output, read-only — it cannot type input or otherwise act as that session. Candidate sessions are discovered via `SessionDiscovery`; picking one streams its output live until Enter is pressed to detach. See Protocols below for the override gate.
+
 **Repository discovery:** `ingest` run with no argument lists candidate repositories under the configured `Assistant:WorkspaceRoot` (every top-level subdirectory, excluding dot-prefixed ones such as `.git`, `.vscode`, `.idea` — no requirement that it be a Git repository, since Repomix packages a wide range of project layouts, not just Git repositories) and lets you pick which to ingest by index. `ingest <path>` still ingests a single path directly, and `ingest <path>,<path>,...` ingests several in one call — all three converge on the same batch-ingestion call, so partial failures are reported the same way regardless of which form triggered it.
 
 **Protocols:** Behaviours with security or privacy impact are mediated by explicit protocol objects rather than ad-hoc checks. A protocol is a component the system consults before acting; it is never assumed, never bypassed, and never implicit.
@@ -61,6 +63,7 @@ CLI (Program.cs)
 - `IExternalLlmProtocol` — gates routing of repository content to any non-local LLM backend. Defaults to `IsOverridden = false`. Until explicitly overridden via `OverrideProtocol()`, `RepositoryDomainService` refuses to fall back to Claude CLI even when LmStudio is offline, throwing `InvalidOperationException` instead of silently exfiltrating data. The override is per-process and is requested at startup (see [Startup protocol prompts](#usage)).
 - `IScriptExecutionProtocol` — gates unattended execution of scheduled scripts. Defaults to `IsOverridden = false`. Until explicitly overridden, a due job is never executed directly by the background timer — it is queued in `PendingJobRunQueue` instead, and only runs once approved via `review`. The override is per-process and is requested at startup alongside the external-routing prompt.
 - `IKagiSearchProtocol` — gates unattended execution of model-proposed Kagi searches. Defaults to `IsOverridden = false`. Until explicitly overridden, every `<kagi_search query="...">` proposal parsed out of a response is queued in `PendingKagiSearchQueue` instead of running, and only executes once approved via `review`. The override is per-process, requested at startup alongside the other two prompts, and even then is bounded: `Assistant:KagiSearchMaxRoundTrips` caps how many auto-approved search→reply hops can chain unattended within a single `ask`/search-resolution call before control falls back to manual review.
+- `ISessionListenProtocol` — gates whether this process's console output can be observed by another local Bastion session at all. Defaults to `IsOverridden = false`. Until explicitly overridden, `SessionBroadcastServer` never binds a listener socket — unlike the other three protocols here, which gate a per-action decision on top of an already-running mechanism, there is no partial/inert state to probe. Once overridden, a same-user-only Unix domain socket and manifest sidecar are created together; observers connect via the `listen` command, read-only, with no channel back into this session.
 - `PendingWriteQueue` — gates persistence of any file content proposed by the LLM. No `<file_write>` block is applied without an interactive `y` confirmation in the `review` command. The queue is the only path from model output to disk. Dedupes by file path — a new proposal for a path already pending is skipped, not stacked.
 - `PendingJobRunQueue` — gates unattended-disabled job execution the same way: one pending entry per job id, skip-and-log (not stacked) if a prior due occurrence for that job hasn't been reviewed yet.
 - `PendingKagiSearchQueue` — gates execution of any Kagi search proposed by the model, the same shape as `PendingWriteQueue`/`PendingJobRunQueue`: one pending entry per proposal, skip-and-log (not stacked) if an identical (repository, query) pair is already pending.
@@ -177,13 +180,20 @@ Before the interactive loop starts, SharpBastion asks three independent consent 
 [PROTOCOL] The search query text (crafted by the model) leaves this machine to Kagi's API once a
 [PROTOCOL] proposal runs, whether unattended or explicitly approved.
 [PROTOCOL] Override kagi-search restriction and allow unattended searches? [y/n]:
+
+[PROTOCOL] A second local process (e.g. another SSH session on this machine) can attach and
+[PROTOCOL] observe this session's console output in real time, read-only — it cannot type
+[PROTOCOL] input, approve reviews, or otherwise act as this session.
+[PROTOCOL] Attaching exposes ingested repository content and LLM responses to that observer.
+[PROTOCOL] Override session-listen restriction and allow read-only observers? [y/n]:
 ```
 
 - External routing — Answer `y` to enable Claude CLI fallback when LmStudio is unreachable. Answer anything else and the system throws `InvalidOperationException` rather than routing externally when LmStudio is offline.
 - Script execution — Answer `y` to let due scheduled jobs run unattended. Answer anything else (the default posture) and due jobs are queued in `PendingJobRunQueue`, requiring a `y` in `review` before they execute.
 - Kagi search — Answer `y` to let proposed searches run unattended, bounded by `Assistant:KagiSearchMaxRoundTrips`. Answer anything else (the default posture) and proposed searches are queued in `PendingKagiSearchQueue`, requiring a `y` in `review` before they run.
+- Session-listen — Answer `y` to let another local Bastion session (via `listen`) observe this one's console output, read-only. Answer anything else (the default posture) and no listener socket is ever bound — there is nothing to attach to, for the lifetime of this process.
 
-All three gates are enforced by their respective protocol objects and are intentional: external routing, unattended script execution, and unattended search execution are never implicit. Each choice is per-process and made fresh on every startup.
+All four gates are enforced by their respective protocol objects and are intentional: external routing, unattended script execution, unattended search execution, and session observability are never implicit. Each choice is per-process and made fresh on every startup.
 
 **CLI commands**
 
@@ -195,6 +205,7 @@ ask <question>             Ask a question about the active repository
 schedule <s> <i>           Schedule a Scripts/*.py job on a fixed interval (e.g. schedule downloadDailyBarcelonaPdf.py 24h)
 review                     Interactively approve or reject pending file writes, job runs, and searches
 status                     Display the currently active repository
+listen                     Discover other running Bastion sessions and observe one's output, read-only
 help                       Show this command list
 exit / quit                Shut down
 ```
@@ -274,6 +285,9 @@ The `compose.yaml` builds and runs the application inside a .NET 10 runtime cont
 - `IsBesPractice` field on `IngestRepositoriesRequestObject` contains a typo (tracked internally).
 - Blocking async calls (`GetAwaiter().GetResult()`) throughout the LLM pipeline — async refactor pending.
 - `Assistant:KagiSearchMaxRoundTrips` only bounds the *unattended* search→reply chain (`IKagiSearchProtocol` overridden). When the protocol is not overridden, a single response proposing many searches queues all of them for manual review with no separate cap.
+- `listen`/session-listen has no backlog or scrollback — an observer only sees output written after it attaches, and there is no way to send input back to the observed session.
+- Session-listen access control is filesystem permissions on a Unix domain socket (owner-only, same OS user) — POSIX-specific. On Windows, the equivalent protection falls back to the user profile directory's default ACLs, unverified.
+- Session-listen's socket and manifest sidecar (`~/.sharpbastion/session-<pid>.*`) are only cleaned up on a graceful stop (`exit`/`quit`, or EOF) within a bounded 2-second shutdown window. A hard kill (`kill -9`, OOM, crash) can leave stale files behind — harmless (dead PIDs are filtered out of `listen`'s candidate list), but not swept.
 - Docker support is still a work in progress. The current setup has unresolved path issues, and the intended design is to run Claude CLI in an isolated container with LM Studio traffic routed through that container as well. `Scripts/` is not currently copied into the published/container output, so scheduled jobs are only verified when running via `dotnet run` from the repository root.
 
 ---
