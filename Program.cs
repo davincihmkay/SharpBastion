@@ -1,3 +1,6 @@
+using System.Net.Sockets;
+using System.Text;
+using System.Text.Json;
 using Microsoft.Extensions.Hosting;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Logging;
@@ -8,6 +11,7 @@ using SharpBastion.Domain;
 using SharpBastion.DomainService;
 using SharpBastion.Helper;
 using SharpBastion.Interface;
+using SharpBastion.Manifest;
 using SharpBastion.Options;
 using SharpBastion.Protocol;
 using SharpBastion.RequestObject;
@@ -50,7 +54,13 @@ builder.Services.AddSingleton<PendingJobRunQueue>();
 builder.Services.AddTransient<JobController>();
 builder.Services.AddHostedService<ScheduledJobRunnerHostedService>();
 
+builder.Services.AddSingleton<ISessionListenProtocol, SessionListenProtocol>();
+builder.Services.AddSingleton<IOutputBroadcaster, OutputBroadcaster>();
+builder.Services.AddHostedService<SessionBroadcastServer>();
+
 using IHost host = builder.Build();
+
+Console.SetOut(new BroadcastingTextWriter(Console.Out, host.Services.GetRequiredService<IOutputBroadcaster>()));
 
 AssistantProfile? assistantProfile = null;
 try
@@ -67,6 +77,7 @@ catch (InvalidOperationException ex)
 ResolveConsent(host.Services.GetRequiredService<IExternalLlmProtocol>());
 ResolveConsent(host.Services.GetRequiredService<IScriptExecutionProtocol>());
 ResolveConsent(host.Services.GetRequiredService<IKagiSearchProtocol>());
+ResolveConsent(host.Services.GetRequiredService<ISessionListenProtocol>());
 
 await host.StartAsync();
 
@@ -74,7 +85,7 @@ RunInteractiveLoop(host.Services, assistantProfile!);
 
 await host.StopAsync();
 
-static void ResolveConsent(IConsentProtocol protocol)
+void ResolveConsent(IConsentProtocol protocol)
 {
     Console.WriteLine();
     foreach (var line in protocol.Description.Split('\n'))
@@ -100,7 +111,7 @@ static void ResolveConsent(IConsentProtocol protocol)
     }
 }
 
-static void RunInteractiveLoop(IServiceProvider hostProvider, AssistantProfile assistantProfile)
+void RunInteractiveLoop(IServiceProvider hostProvider, AssistantProfile assistantProfile)
 {
     var homepath = Environment.GetFolderPath(Environment.SpecialFolder.UserProfile);
     string? activeRepo = null;
@@ -147,6 +158,8 @@ static void RunInteractiveLoop(IServiceProvider hostProvider, AssistantProfile a
                     {
                         activeRepo = firstIngestedRepository;
                         Console.WriteLine($"Active repo set to: {activeRepo}");
+
+                        RecordSessionManifestIfListenable(hostProvider, firstIngestedRepository);
                     }
                 }
                 catch (Exception ex)
@@ -215,6 +228,19 @@ static void RunInteractiveLoop(IServiceProvider hostProvider, AssistantProfile a
                 break;
             }
 
+            case "listen":
+            {
+                try
+                {
+                    ListenToSession();
+                }
+                catch (Exception ex)
+                {
+                    Console.WriteLine($"[ERROR] {ex.Message}");
+                }
+                break;
+            }
+
             case "review":
             {
                 try
@@ -241,6 +267,7 @@ static void RunInteractiveLoop(IServiceProvider hostProvider, AssistantProfile a
             case "exit":
             case "quit":
                 Console.WriteLine("Shutting down.");
+                TryGracefulShutdown();
                 Environment.Exit(0);
                 break;
 
@@ -251,14 +278,21 @@ static void RunInteractiveLoop(IServiceProvider hostProvider, AssistantProfile a
     }
 }
 
-static void AbortNonInteractive()
+void AbortNonInteractive()
 {
     Console.WriteLine();
     Console.WriteLine("[FATAL] stdin is closed or EOF received. SharpBastion requires an interactive TTY.");
     Console.WriteLine("[HINT]  docker compose: ensure 'stdin_open: true' and 'tty: true' on the service, then run:");
     Console.WriteLine("[HINT]    docker compose run --rm sharpbastion");
     Console.WriteLine("[HINT]  docker run: pass -it, e.g. 'docker run -it <image>'");
+    TryGracefulShutdown();
     Environment.Exit(1);
+}
+
+void TryGracefulShutdown()
+{
+    try { host.StopAsync(TimeSpan.FromSeconds(2)).GetAwaiter().GetResult(); }
+    catch { /* best-effort — proceed to Environment.Exit regardless */ }
 }
 
 static string? ResolvePath(string? input, string homepath)
@@ -269,7 +303,7 @@ static string? ResolvePath(string? input, string homepath)
         : input;
 }
 
-static List<string>? ResolveIngestPaths(string? argument, string homepath, string workspaceRoot)
+List<string>? ResolveIngestPaths(string? argument, string homepath, string workspaceRoot)
 {
     if (argument is not null)
     {
@@ -342,6 +376,7 @@ static void PrintHelp(string name)
     Console.WriteLine("║  schedule <s> <i> Schedule a Scripts/ job    ║");
     Console.WriteLine("║  review          Approve/reject pending items║");
     Console.WriteLine("║  status          Show active repo            ║");
+    Console.WriteLine("║  listen          View live output            ║");
     Console.WriteLine("║  help            Show this menu              ║");
     Console.WriteLine("║  exit / quit     Shut down                   ║");
     Console.WriteLine(bottom);
@@ -359,6 +394,34 @@ static IngestRepositoriesResultView IngestRepository(IServiceProvider hostProvid
     };
 
     return controller.IngestRepositories(request);
+}
+
+static void RecordSessionManifestIfListenable(IServiceProvider hostProvider, string firstIngestedRepository)
+{
+    var sessionListenProtocol = hostProvider.GetRequiredService<ISessionListenProtocol>();
+    if (!sessionListenProtocol.IsOverridden)
+        return;
+
+    var manifestPath = SessionPaths.ManifestPathFor(Environment.ProcessId);
+
+    try
+    {
+        Directory.CreateDirectory(SessionPaths.SharpBastionHomeDir);
+
+        var existing = System.IO.File.Exists(manifestPath)
+            ? JsonSerializer.Deserialize<SessionManifest>(System.IO.File.ReadAllText(manifestPath))
+            : null;
+
+        if (existing?.FirstIngestedRepository is not null)
+            return; // Already recorded — first ingest already won.
+
+        var manifest = new SessionManifest { Pid = Environment.ProcessId, FirstIngestedRepository = firstIngestedRepository };
+        System.IO.File.WriteAllText(manifestPath, JsonSerializer.Serialize(manifest));
+    }
+    catch (Exception ex)
+    {
+        Console.WriteLine($"[NOTICE] Could not record session manifest for 'listen' discovery: {ex.Message}");
+    }
 }
 
 static AskQuestionResultView AskQuestion(IServiceProvider hostProvider, AskQuestionRequestObject resourceObject)
@@ -389,7 +452,80 @@ static void ScheduleJob(IServiceProvider hostProvider, ScheduleJobRequestObject 
     Console.WriteLine(result.Message);
 }
 
-static void ReviewPendingWrites(IServiceProvider hostProvider)
+void ListenToSession()
+{
+    var candidates = SessionDiscovery.ListCandidates();
+    if (candidates.Count == 0)
+    {
+        Console.WriteLine($"No other running Bastion sessions found under {SessionPaths.SharpBastionHomeDir}.");
+        return;
+    }
+
+    Console.WriteLine("Running Bastion sessions:");
+    for (var i = 0; i < candidates.Count; i++)
+    {
+        var label = candidates[i].FirstIngestedRepository ?? "(no repository ingested yet)";
+        Console.WriteLine($"  {i + 1}. pid {candidates[i].Pid} — {label}");
+    }
+
+    Console.Write("Select session to observe (index): ");
+    var rawSelection = Console.ReadLine();
+    if (rawSelection is null)
+    {
+        AbortNonInteractive();
+    }
+
+    if (!int.TryParse(rawSelection!.Trim(), out var index) || index < 1 || index > candidates.Count)
+    {
+        Console.WriteLine($"[SKIP] '{rawSelection.Trim()}' is not a valid selection — ignored.");
+        return;
+    }
+
+    var target = candidates[index - 1];
+    var socketPath = SessionPaths.SocketPathFor(target.Pid);
+
+    using var socket = new Socket(AddressFamily.Unix, SocketType.Stream, ProtocolType.Unspecified);
+    try
+    {
+        socket.Connect(new UnixDomainSocketEndPoint(socketPath));
+    }
+    catch (Exception ex)
+    {
+        Console.WriteLine($"[ERROR] Could not connect to pid {target.Pid}'s session: {ex.Message}");
+        return;
+    }
+
+    using var stream = new NetworkStream(socket, ownsSocket: false);
+    var pumpTask = Task.Run(() => PumpSocketToConsole(stream));
+
+    Console.WriteLine($"[ATTACHED] Streaming read-only output from pid {target.Pid}. Press Enter to stop listening.");
+    Console.ReadLine(); // Any input, including a bare Enter, ends the listen session.
+
+    try { stream.Close(); } catch { /* unblocks the pending read in PumpSocketToConsole */ }
+    try { pumpTask.Wait(TimeSpan.FromSeconds(2)); } catch { /* pump task is exiting on the now-faulted read */ }
+
+    Console.WriteLine($"[DETACHED] Stopped listening to pid {target.Pid}.");
+}
+
+static void PumpSocketToConsole(NetworkStream stream)
+{
+    var buffer = new byte[4096];
+    try
+    {
+        int bytesRead;
+        while ((bytesRead = stream.Read(buffer, 0, buffer.Length)) > 0)
+        {
+            Console.Write(Encoding.UTF8.GetString(buffer, 0, bytesRead));
+        }
+    }
+    catch
+    {
+        // Stream closed — either we asked it to stop, or the remote session
+        // exited first. Either way, normal end of the pump.
+    }
+}
+
+void ReviewPendingWrites(IServiceProvider hostProvider)
 {
     using IServiceScope serviceScope = hostProvider.CreateScope();
     var controller = serviceScope.ServiceProvider.GetRequiredService<FileWriteController>();
@@ -425,7 +561,7 @@ static void ReviewPendingWrites(IServiceProvider hostProvider)
     }
 }
 
-static void ReviewPendingJobRuns(IServiceProvider hostProvider)
+void ReviewPendingJobRuns(IServiceProvider hostProvider)
 {
     using IServiceScope serviceScope = hostProvider.CreateScope();
     var controller = serviceScope.ServiceProvider.GetRequiredService<JobController>();
@@ -460,7 +596,7 @@ static void ReviewPendingJobRuns(IServiceProvider hostProvider)
     }
 }
 
-static void ReviewPendingKagiSearches(IServiceProvider hostProvider)
+void ReviewPendingKagiSearches(IServiceProvider hostProvider)
 {
     using IServiceScope serviceScope = hostProvider.CreateScope();
     var controller = serviceScope.ServiceProvider.GetRequiredService<KagiSearchController>();
