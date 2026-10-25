@@ -5,6 +5,7 @@ using Microsoft.Extensions.Hosting;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Options;
+using SharpBastion.Cli;
 using SharpBastion.Client;
 using SharpBastion.Controller;
 using SharpBastion.Domain;
@@ -46,6 +47,8 @@ builder.Services.AddSingleton<IKagiSearchProtocol, KagiSearchProtocol>();
 builder.Services.AddSingleton<PendingKagiSearchQueue>();
 builder.Services.AddTransient<KagiSearchController>();
 
+builder.Services.AddGitHubPullRequestSupport(builder.Configuration);
+
 builder.Services.AddTransient<IPythonScriptClient, PythonScriptClient>();
 builder.Services.AddSingleton<IScriptExecutionProtocol, ScriptExecutionProtocol>();
 builder.Services.AddSingleton<IJobSchedulerService, JobSchedulerService>();
@@ -77,6 +80,7 @@ catch (InvalidOperationException ex)
 ResolveConsent(host.Services.GetRequiredService<IExternalLlmProtocol>());
 ResolveConsent(host.Services.GetRequiredService<IScriptExecutionProtocol>());
 ResolveConsent(host.Services.GetRequiredService<IKagiSearchProtocol>());
+ResolveConsent(host.Services.GetRequiredService<IGitHubProtocol>());
 ResolveConsent(host.Services.GetRequiredService<ISessionListenProtocol>());
 
 await host.StartAsync();
@@ -228,6 +232,21 @@ void RunInteractiveLoop(IServiceProvider hostProvider, AssistantProfile assistan
                 break;
             }
 
+            case "pr":
+            {
+                if (activeRepo is null) { Console.WriteLine("No active repo. Run 'ingest <path>' first."); break; }
+
+                try
+                {
+                    PullRequestCommandHandler.Run(hostProvider, activeRepo, argument, AbortNonInteractive);
+                }
+                catch (Exception ex)
+                {
+                    Console.WriteLine($"[ERROR] {ex.Message}");
+                }
+                break;
+            }
+
             case "listen":
             {
                 try
@@ -245,9 +264,7 @@ void RunInteractiveLoop(IServiceProvider hostProvider, AssistantProfile assistan
             {
                 try
                 {
-                    ReviewPendingWrites(hostProvider);
-                    ReviewPendingJobRuns(hostProvider);
-                    ReviewPendingKagiSearches(hostProvider);
+                    ReviewCommandHandler.ReviewAll(hostProvider, AbortNonInteractive);
                 }
                 catch (Exception ex)
                 {
@@ -374,6 +391,7 @@ static void PrintHelp(string name)
     Console.WriteLine("║  use <path>      Switch active repo          ║");
     Console.WriteLine("║  ask <question>  Ask about active repo       ║");
     Console.WriteLine("║  schedule <s> <i> Schedule a Scripts/ job    ║");
+    Console.WriteLine("║  pr sync <n> [--all] Address PR comments     ║");
     Console.WriteLine("║  review          Approve/reject pending items║");
     Console.WriteLine("║  status          Show active repo            ║");
     Console.WriteLine("║  listen          View live output            ║");
@@ -522,117 +540,5 @@ static void PumpSocketToConsole(NetworkStream stream)
     {
         // Stream closed — either we asked it to stop, or the remote session
         // exited first. Either way, normal end of the pump.
-    }
-}
-
-void ReviewPendingWrites(IServiceProvider hostProvider)
-{
-    using IServiceScope serviceScope = hostProvider.CreateScope();
-    var controller = serviceScope.ServiceProvider.GetRequiredService<FileWriteController>();
-
-    var pending = controller.ListPendingWrites();
-    if (pending.Count == 0)
-    {
-        Console.WriteLine("No pending writes.");
-        return;
-    }
-
-    Console.WriteLine($"{pending.Count} pending write(s).");
-    foreach (var view in pending)
-    {
-        Console.WriteLine($"\n  File  : {view.DisplayPath}");
-        Console.WriteLine("--- diff ---");
-        Console.WriteLine(view.Diff);
-        Console.WriteLine("--- end ---");
-        Console.Write("Approve write? [y/n]: ");
-        var rawAnswer = Console.ReadLine();
-        if (rawAnswer is null)
-        {
-            AbortNonInteractive();
-        }
-
-        var answer = rawAnswer!.Trim().ToLower();
-
-        Console.WriteLine(controller.ResolveWrite(new ResolveWriteRequestObject
-        {
-            Id = view.Id,
-            Approve = answer == "y"
-        }).Message);
-    }
-}
-
-void ReviewPendingJobRuns(IServiceProvider hostProvider)
-{
-    using IServiceScope serviceScope = hostProvider.CreateScope();
-    var controller = serviceScope.ServiceProvider.GetRequiredService<JobController>();
-
-    var pending = controller.ListPendingRuns();
-    if (pending.Count == 0)
-    {
-        Console.WriteLine("No pending job runs.");
-        return;
-    }
-
-    Console.WriteLine($"{pending.Count} pending job run(s).");
-    foreach (var view in pending)
-    {
-        Console.WriteLine($"\n  Job   : {view.ScriptName}");
-        Console.WriteLine($"  Path  : {view.ScriptAbsolutePath}");
-        Console.WriteLine($"  Every : {view.Interval}");
-        Console.Write("Run now? [y/n]: ");
-        var rawAnswer = Console.ReadLine();
-        if (rawAnswer is null)
-        {
-            AbortNonInteractive();
-        }
-
-        var answer = rawAnswer!.Trim().ToLower();
-
-        Console.WriteLine(controller.ResolveRun(new ResolveJobRunRequestObject
-        {
-            ScriptName = view.ScriptName,
-            Approve = answer == "y"
-        }).Message);
-    }
-}
-
-void ReviewPendingKagiSearches(IServiceProvider hostProvider)
-{
-    using IServiceScope serviceScope = hostProvider.CreateScope();
-    var controller = serviceScope.ServiceProvider.GetRequiredService<KagiSearchController>();
-
-    var pending = controller.ListPendingSearches();
-    if (pending.Count == 0)
-    {
-        Console.WriteLine("No pending searches.");
-        return;
-    }
-
-    Console.WriteLine($"{pending.Count} pending search(es).");
-    foreach (var view in pending)
-    {
-        Console.WriteLine($"\n  Query : {view.Query}");
-        Console.Write("Approve search? [y/n]: ");
-        var rawAnswer = Console.ReadLine();
-        if (rawAnswer is null)
-        {
-            AbortNonInteractive();
-        }
-
-        var answer = rawAnswer!.Trim().ToLower();
-
-        var result = controller.ResolveSearch(new ResolveKagiSearchRequestObject
-        {
-            Id = view.Id,
-            Approve = answer == "y"
-        });
-
-        if (!result.Success)
-            Console.WriteLine($"[ERROR] {result.DisplayMessage}");
-        else
-            Console.WriteLine(result.DisplayMessage);
-
-        foreach (var notice in result.Notices)
-            Console.WriteLine($"[NOTICE] {notice}");
     }
 }
