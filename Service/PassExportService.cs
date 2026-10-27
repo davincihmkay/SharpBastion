@@ -31,6 +31,15 @@ public class PassExportService : IPassExportService
         if (selected.Count == 0)
             return new OperationResultView(false, $"No passes recorded for pull request #{command.PullRequestNumber}.");
 
+        // A pass is awaiting review exactly while its commit sits in the queue.
+        if (command.PendingOnly)
+        {
+            selected = selected.Where(p => p.State == PassState.Proposed).ToList();
+
+            if (selected.Count == 0)
+                return new OperationResultView(false, "No passes are awaiting review.");
+        }
+
         var pullRequests = selected.Select(p => p.PullRequest).Distinct().ToList();
         if (pullRequests.Count > 1)
         {
@@ -45,7 +54,7 @@ public class PassExportService : IPassExportService
         }
 
         var pullRequest = pullRequests[0];
-        var html = PassReportRenderer.Render(selected, DateTimeOffset.UtcNow);
+        var html = PassReportRenderer.Render(selected, DateTimeOffset.UtcNow, command.PendingOnly);
 
         string path;
         try
@@ -67,8 +76,9 @@ public class PassExportService : IPassExportService
             return new OperationResultView(false, $"Could not write '{path}': {ex.Message}{hint}");
         }
 
+        var kind = command.PendingOnly ? "pending pass(es)" : "pass(es)";
         return new OperationResultView(true,
-            $"Exported {selected.Count} pass(es) for {pullRequest} to {path}. " +
+            $"Exported {selected.Count} {kind} for {pullRequest} to {path}. " +
             "It contains source code and review comments: treat it as sensitive.");
     }
 
@@ -89,9 +99,10 @@ public class PassExportService : IPassExportService
         EnsurePrivateDirectory(directory);
 
         // Owner and repository are validated by PullRequestReference, so they are safe in a file name.
+        var prefix = command.PendingOnly ? "pending" : "passes";
         var stamp = DateTime.UtcNow.ToString("yyyyMMdd-HHmmss", CultureInfo.InvariantCulture);
         return Path.Combine(directory,
-            $"passes-{pullRequest.Owner}-{pullRequest.Repository}-{pullRequest.Number}-{stamp}.html");
+            $"{prefix}-{pullRequest.Owner}-{pullRequest.Repository}-{pullRequest.Number}-{stamp}.html");
     }
 
     private static void EnsurePrivateDirectory(string directory)

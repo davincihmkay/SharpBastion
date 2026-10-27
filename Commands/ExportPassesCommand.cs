@@ -5,6 +5,7 @@ namespace SharpBastion.Commands;
 public class ExportPassesCommand
 {
     public int? PullRequestNumber;
+    public bool PendingOnly;
     public string? OutputPath;
 
     public static ExportPassesCommand PopulateFromRequestObject(ExportPassesRequestObject requestObject)
@@ -29,6 +30,7 @@ public class ExportPassesCommand
         return new ExportPassesCommand
         {
             PullRequestNumber = requestObject.PullRequestNumber,
+            PendingOnly = requestObject.PendingOnly,
             OutputPath = outputPath
         };
     }

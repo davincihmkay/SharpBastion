@@ -12,16 +12,18 @@ namespace SharpBastion.Cli;
 public static class PullRequestCommandHandler
 {
     private const int MaxChainedIterations = 10;
-    private const string Usage = "Usage: pr sync <number> [--all]";
+    private const string Usage = "Usage: pr sync <number> [--all] [--export]";
 
     /// <summary>
     /// 'pr sync &lt;n&gt;' handles one comment. 'pr sync &lt;n&gt; --all' chains
     /// sync and review until nothing is left, a sync fails, or the iteration
     /// cap is hit. Every write and commit is still approved interactively.
+    /// '--export' writes an HTML report of what a sync queued, before it is
+    /// reviewed: once for a single sync, once per iteration when chained.
     /// </summary>
     public static void Run(IServiceProvider hostProvider, string activeRepo, string? argument, Action abortNonInteractive)
     {
-        if (!TryParseSyncArguments(argument, out var number, out var chained))
+        if (!TryParseSyncArguments(argument, out var number, out var chained, out var export))
         {
             Console.WriteLine(Usage);
             return;
@@ -29,34 +31,42 @@ public static class PullRequestCommandHandler
 
         if (chained)
         {
-            RunChained(hostProvider, activeRepo, number, abortNonInteractive);
+            RunChained(hostProvider, activeRepo, number, export, abortNonInteractive);
             return;
         }
 
-        SyncOnce(hostProvider, activeRepo, number);
+        if (SyncOnce(hostProvider, activeRepo, number) && export)
+            ExportPendingIfQueued(hostProvider, number);
+
         PrintQueueSummary(hostProvider);
     }
 
-    private static bool TryParseSyncArguments(string? argument, out int number, out bool chained)
+    private static bool TryParseSyncArguments(string? argument, out int number, out bool chained, out bool export)
     {
         number = 0;
         chained = false;
+        export = false;
 
         var parts = (argument ?? string.Empty).Split(' ', StringSplitOptions.RemoveEmptyEntries);
-        if (parts.Length is < 2 or > 3) return false;
+        if (parts.Length is < 2 or > 4) return false;
         if (!parts[0].Equals("sync", StringComparison.OrdinalIgnoreCase)) return false;
         if (!int.TryParse(parts[1], out number) || number <= 0) return false;
 
-        if (parts.Length == 3)
+        foreach (var flag in parts.Skip(2))
         {
-            if (!parts[2].Equals("--all", StringComparison.OrdinalIgnoreCase)) return false;
-            chained = true;
+            if (flag.Equals("--all", StringComparison.OrdinalIgnoreCase) && !chained)
+                chained = true;
+            else if (flag.Equals("--export", StringComparison.OrdinalIgnoreCase) && !export)
+                export = true;
+            else
+                return false;
         }
 
         return true;
     }
 
-    private static void RunChained(IServiceProvider hostProvider, string activeRepo, int number, Action abortNonInteractive)
+    private static void RunChained(
+        IServiceProvider hostProvider, string activeRepo, int number, bool export, Action abortNonInteractive)
     {
         var writeQueue = hostProvider.GetRequiredService<PendingWriteQueue>();
         var commitQueue = hostProvider.GetRequiredService<PendingCommitQueue>();
@@ -76,9 +86,12 @@ public static class PullRequestCommandHandler
                 break;
             }
 
-            // Something was proposed: review it with the normal prompts, then go again.
+            // Something was proposed: report it if asked, review it with the normal prompts, then go again.
             if (commitQueue.Count > 0 || writeQueue.Count > 0)
             {
+                if (export)
+                    ExportPendingIfQueued(hostProvider, number);
+
                 ReviewCommandHandler.ReviewAll(hostProvider, abortNonInteractive);
                 reviewed++;
                 continue;
@@ -113,6 +126,35 @@ public static class PullRequestCommandHandler
             Console.WriteLine($"[NOTICE] {notice}");
 
         return result.Success;
+    }
+
+    /// <summary>
+    /// A pass is awaiting review exactly while its commit is queued, so an empty
+    /// commit queue means there is nothing to report. Best effort: a failed
+    /// export is printed and never stops the sync or the review that follows.
+    /// </summary>
+    private static void ExportPendingIfQueued(IServiceProvider hostProvider, int number)
+    {
+        var commitQueue = hostProvider.GetRequiredService<PendingCommitQueue>();
+        if (commitQueue.Count == 0) return;
+
+        try
+        {
+            using var scope = hostProvider.CreateScope();
+            var controller = scope.ServiceProvider.GetRequiredService<PassExportController>();
+
+            var result = controller.Export(new ExportPassesRequestObject
+            {
+                PullRequestNumber = number,
+                PendingOnly = true
+            });
+
+            Console.WriteLine(result.Success ? $"[EXPORT] {result.Message}" : $"[EXPORT ERROR] {result.Message}");
+        }
+        catch (Exception ex)
+        {
+            Console.WriteLine($"[EXPORT ERROR] {ex.Message}");
+        }
     }
 
     private static void PrintQueueSummary(IServiceProvider hostProvider)

@@ -8,7 +8,8 @@ namespace SharpBastion.Helper;
 /// <summary>
 /// Renders recorded passes as one self-contained HTML page: a timeline, a
 /// file-by-pass matrix, per-file history with net change across passes, and
-/// per-pass detail with diffs.
+/// per-pass detail with diffs. In pending mode (passes still awaiting review)
+/// the matrix and file history are left out, because they describe history.
 ///
 /// Everything in a pass is untrusted text (review comments, model output, file
 /// contents), so every value is HTML-encoded and the page carries no script and
@@ -30,7 +31,7 @@ public static class PassReportRenderer
     private sealed record FileRow(string Path, IReadOnlyList<FileView> Views);
 
     /// <summary>Passes must belong to one pull request. Throws when none are given.</summary>
-    public static string Render(IReadOnlyList<PassSnapshot> passes, DateTimeOffset generatedAt)
+    public static string Render(IReadOnlyList<PassSnapshot> passes, DateTimeOffset generatedAt, bool pendingOnly = false)
     {
         if (passes.Count == 0)
             throw new ArgumentException("At least one pass is required.", nameof(passes));
@@ -55,11 +56,16 @@ public static class PassReportRenderer
 
         var sb = new StringBuilder(64 * 1024);
 
-        AppendHead(sb, ordered);
-        AppendSummary(sb, ordered, rows, generatedAt);
+        AppendHead(sb, ordered, pendingOnly);
+        AppendSummary(sb, ordered, rows, generatedAt, pendingOnly);
         AppendTimeline(sb, ordered, viewsByPass);
-        AppendMatrix(sb, ordered, rows, cells);
-        AppendFileHistory(sb, rows);
+
+        if (!pendingOnly)
+        {
+            AppendMatrix(sb, ordered, rows, cells);
+            AppendFileHistory(sb, rows);
+        }
+
         AppendPassDetails(sb, ordered, viewsByPass);
         AppendFoot(sb);
 
@@ -68,15 +74,18 @@ public static class PassReportRenderer
 
     // ── Sections ─────────────────────────────────────────────────────────────
 
-    private static void AppendHead(StringBuilder sb, IReadOnlyList<PassSnapshot> passes)
+    private static void AppendHead(StringBuilder sb, IReadOnlyList<PassSnapshot> passes, bool pendingOnly)
     {
         var pr = passes[0].PullRequest.ToString();
+        var title = pendingOnly
+            ? $"SharpBastion pending review — {pr}"
+            : $"SharpBastion passes — {pr}";
 
         sb.Append("<!DOCTYPE html>\n<html lang=\"en\">\n<head>\n<meta charset=\"utf-8\">\n");
         sb.Append("<meta http-equiv=\"Content-Security-Policy\" content=\"default-src 'none'; style-src 'unsafe-inline'\">\n");
         sb.Append("<meta name=\"referrer\" content=\"no-referrer\">\n");
         sb.Append("<meta name=\"viewport\" content=\"width=device-width, initial-scale=1\">\n");
-        sb.Append($"<title>SharpBastion passes — {E(pr)}</title>\n");
+        sb.Append($"<title>{E(title)}</title>\n");
         sb.Append("<style>").Append(Css).Append("</style>\n</head>\n<body>\n<main>\n");
     }
 
@@ -84,20 +93,28 @@ public static class PassReportRenderer
         StringBuilder sb,
         IReadOnlyList<PassSnapshot> passes,
         IReadOnlyList<FileRow> rows,
-        DateTimeOffset generatedAt)
+        DateTimeOffset generatedAt,
+        bool pendingOnly)
     {
+        var pr = passes[0].PullRequest.ToString();
         var committed = passes.Count(p => IsCommitted(p.State));
         var multi = rows.Count(r => r.Views.Select(v => v.Pass.Sequence).Distinct().Count() > 1);
 
-        sb.Append($"<h1>Passes for {E(passes[0].PullRequest.ToString())}</h1>\n");
+        sb.Append(pendingOnly
+            ? $"<h1>Awaiting review: {E(pr)}</h1>\n"
+            : $"<h1>Passes for {E(pr)}</h1>\n");
         sb.Append($"<p class=\"sub\">Branch <code>{E(passes[^1].Branch)}</code> · generated {E(Format(generatedAt))}</p>\n");
+
+        if (pendingOnly)
+            sb.Append("<div class=\"warnbox\">Snapshot of the passes waiting for review when this file was generated. Approving or rejecting afterwards does not update it.</div>\n");
+
         sb.Append("<div class=\"warnbox\">This report contains source code and review comments from the session. Treat it as sensitive.</div>\n");
 
         sb.Append("<div class=\"stats\">");
-        Stat(sb, passes.Count, "passes");
-        Stat(sb, committed, "committed");
+        Stat(sb, passes.Count, pendingOnly ? "awaiting review" : "passes");
+        if (!pendingOnly) Stat(sb, committed, "committed");
         Stat(sb, rows.Count, "files touched");
-        Stat(sb, multi, "files in 2+ passes");
+        if (!pendingOnly) Stat(sb, multi, "files in 2+ passes");
         sb.Append("</div>\n");
     }
 

@@ -11,11 +11,12 @@ namespace SharpBastion.Cli;
 public static class ExportCommandHandler
 {
     private const string Usage =
-        "Usage: export [--pr <number>] [--out <file.html>]   (--out takes the rest of the line, so put it last)";
+        "Usage: export [--pr <number>] [--pending] [--out <file.html>]   " +
+        "(--pending: only passes awaiting review; --out takes the rest of the line, so put it last)";
 
     public static void Run(IServiceProvider hostProvider, string? argument)
     {
-        if (!TryParse(argument, out var pullRequestNumber, out var outputPath))
+        if (!TryParse(argument, out var pullRequestNumber, out var pendingOnly, out var outputPath))
         {
             Console.WriteLine(Usage);
             return;
@@ -27,15 +28,18 @@ public static class ExportCommandHandler
         var result = controller.Export(new ExportPassesRequestObject
         {
             PullRequestNumber = pullRequestNumber,
+            PendingOnly = pendingOnly,
             OutputPath = outputPath
         });
 
         Console.WriteLine(result.Success ? result.Message : $"[ERROR] {result.Message}");
     }
 
-    private static bool TryParse(string? argument, out int? pullRequestNumber, out string? outputPath)
+    private static bool TryParse(
+        string? argument, out int? pullRequestNumber, out bool pendingOnly, out string? outputPath)
     {
         pullRequestNumber = null;
+        pendingOnly = false;
         outputPath = null;
 
         var rest = (argument ?? string.Empty).Trim();
@@ -54,6 +58,11 @@ public static class ExportCommandHandler
 
                 pullRequestNumber = parsed;
                 rest = valueSplit.Length > 1 ? valueSplit[1].Trim() : string.Empty;
+            }
+            else if (flag.Equals("--pending", StringComparison.OrdinalIgnoreCase))
+            {
+                pendingOnly = true;
+                rest = tail;
             }
             else if (flag.Equals("--out", StringComparison.OrdinalIgnoreCase))
             {
