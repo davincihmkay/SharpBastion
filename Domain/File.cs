@@ -9,6 +9,7 @@ public class File
     private readonly LocalPath _path;
     private FileContent _content;
     private PendingFileWrite? _pendingWrite;
+    private RemoteFileVersion? _remoteVersion;
 
     public string Name => _name;
     public string Content => _content.Value;
@@ -42,6 +43,22 @@ public class File
 
     public bool HasPendingWrite => _pendingWrite is not null;
 
+    /// <summary>
+    /// The file as it exists at the head of a pull request, or null when no PR
+    /// sync has attached one. Snapshot only — see RemoteFileVersion.IsCurrentFor.
+    /// </summary>
+    public RemoteFileVersion? RemoteVersion => _remoteVersion;
+
+    /// <summary>
+    /// Whether the local content matches the attached remote version, ignoring
+    /// line-ending differences. Null when no remote version is attached —
+    /// "unknown" is deliberately distinct from "drifted".
+    /// </summary>
+    public bool? IsInSyncWithRemote =>
+        _remoteVersion is null
+            ? null
+            : NormalizeLineEndings(_content.Value) == NormalizeLineEndings(_remoteVersion.Content.Value);
+
     public PendingFileWrite? GetPendingWrite() => _pendingWrite;
 
     public string? GetPendingWriteDiff()
@@ -49,6 +66,14 @@ public class File
         if (_pendingWrite is null) return null;
 
         return DiffFormatter.BuildUnifiedDiff(_content.Value, _pendingWrite.ProposedContent.Value);
+    }
+
+    public void AttachRemoteVersion(RemoteFileVersion remoteVersion)
+    {
+        if (remoteVersion is null)
+            throw new ArgumentNullException(nameof(remoteVersion));
+
+        _remoteVersion = remoteVersion;
     }
 
     public void ApplyProposal(FileContent? proposedContent)
@@ -76,4 +101,7 @@ public class File
     }
 
     public void DiscardPendingWrite() => _pendingWrite = null;
+
+    private static string NormalizeLineEndings(string content) =>
+        content.Replace("\r\n", "\n");
 }
