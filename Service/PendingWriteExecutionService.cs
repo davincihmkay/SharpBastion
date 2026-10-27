@@ -9,13 +9,16 @@ public class PendingWriteExecutionService : IPendingWriteExecutionService
 {
     private readonly PendingWriteQueue _pendingWriteQueue;
     private readonly IFileWriterService _fileWriterService;
+    private readonly PassJournal _passJournal;
 
     public PendingWriteExecutionService(
         PendingWriteQueue pendingWriteQueue,
-        IFileWriterService fileWriterService)
+        IFileWriterService fileWriterService,
+        PassJournal passJournal)
     {
         _pendingWriteQueue = pendingWriteQueue;
         _fileWriterService = fileWriterService;
+        _passJournal = passJournal;
     }
 
     public async Task<OperationResultView> ApproveAsync(ResolvePendingWriteCommand command)
@@ -35,6 +38,9 @@ public class PendingWriteExecutionService : IPendingWriteExecutionService
 
         file.AcceptPendingWrite();
 
+        // No-op for writes that did not come from a pull request pass.
+        _passJournal.RecordFileDecision(pendingWrite.AbsolutePath.Value, approved: true);
+
         return new OperationResultView(true, $"Written: {pendingWrite.AbsolutePath.Value}");
     }
 
@@ -43,7 +49,13 @@ public class PendingWriteExecutionService : IPendingWriteExecutionService
         if (!_pendingWriteQueue.TryResolve(command.Id, out var file) || file is null)
             return new OperationResultView(false, $"No pending write found for '{command.Id}'. Already resolved or unknown.");
 
+        // Read the path before the proposal is discarded.
+        var rejectedPath = file.GetPendingWrite()?.AbsolutePath.Value;
+
         file.DiscardPendingWrite();
+
+        if (rejectedPath is not null)
+            _passJournal.RecordFileDecision(rejectedPath, approved: false);
 
         return new OperationResultView(true, $"Rejected: {file.Name}");
     }
