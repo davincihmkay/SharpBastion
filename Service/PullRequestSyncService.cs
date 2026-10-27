@@ -1,3 +1,4 @@
+using System.Text;
 using Microsoft.Extensions.Options;
 using SharpBastion.ClientResponseObject;
 using SharpBastion.Commands;
@@ -115,6 +116,10 @@ public class PullRequestSyncService : IPullRequestSyncService
         if (_options.MaxFileBytes <= 0)
             throw new SyncPreconditionException(
                 $"'GitHub:MaxFileBytes' is {_options.MaxFileBytes}, which is not positive. Fix it in appsettings.json.");
+
+        if (_options.MaxFilesPerComment <= 0)
+            throw new SyncPreconditionException(
+                $"'GitHub:MaxFilesPerComment' is {_options.MaxFilesPerComment}, which is not positive. Fix it in appsettings.json.");
     }
 
     /// <summary>
@@ -337,6 +342,10 @@ public class PullRequestSyncService : IPullRequestSyncService
     private static string ToAbsolutePath(SyncTarget target, string repositoryRelativePath) =>
         Path.GetFullPath(Path.Combine(target.RepositoryDirectory, repositoryRelativePath));
 
+    private static string ToRepositoryRelative(string repositoryDirectory, string absolutePath) =>
+        Path.GetRelativePath(repositoryDirectory, absolutePath)
+            .Replace(Path.DirectorySeparatorChar, '/');
+
     /// <summary>True when the file, or any directory between the repository root and it, is a link.</summary>
     private static bool ContainsSymbolicLink(string repositoryDirectory, string absolutePath)
     {
@@ -372,7 +381,7 @@ public class PullRequestSyncService : IPullRequestSyncService
         notices.Add($"Skipped comment {comment.Id} ({reason}).");
     }
 
-    // ── Steps 7-8: ask the model, queue the commit ───────────────────────────
+    // ── Steps 7-8: ask the model, validate the proposal, queue the commit ────
 
     private AskQuestionResultView ProposeChange(
         SyncTarget target,
@@ -397,7 +406,19 @@ public class PullRequestSyncService : IPullRequestSyncService
             return new AskQuestionResultView(true, result.DisplayMessage, notices);
         }
 
-        QueueCommit(target, comment, pendingFiles, result.DisplayMessage, remainingCandidates, notices);
+        // All-or-nothing: a multi-file fix is never half-queued.
+        var rejection = ValidateProposal(target, comment, pendingFiles);
+        if (rejection is not null)
+        {
+            DiscardPendingWrites(pendingFiles);
+            _ledger.MarkProcessed(target.PullRequest, comment.Id);
+            notices.Add($"Proposal for comment {comment.Id} discarded: {rejection} " +
+                        "It is marked processed; no reply was posted.");
+            return new AskQuestionResultView(true, result.DisplayMessage, notices);
+        }
+
+        var paths = pendingFiles.Select(f => f.GetPendingWrite()!.AbsolutePath).ToList();
+        QueueCommit(target, comment, paths, result.DisplayMessage, remainingCandidates, notices);
 
         return new AskQuestionResultView(true, result.DisplayMessage, notices);
     }
@@ -413,7 +434,8 @@ public class PullRequestSyncService : IPullRequestSyncService
             .OrderBy(c => c.CreatedAt)
             .ToList();
 
-        var question = PullRequestPromptBuilder.Build(target.PullRequest, comment, threadReplies, currentFile);
+        var question = PullRequestPromptBuilder.Build(
+            target.PullRequest, comment, threadReplies, currentFile, _options.MaxFilesPerComment);
 
         return _repositoryIngestorService.AskQuestion(new AskRepositoryQuestionCommand
         {
@@ -424,14 +446,109 @@ public class PullRequestSyncService : IPullRequestSyncService
 
     /// <summary>
     /// The write queue was empty before the model call, so every pending write
-    /// inside the repository came from it.
+    /// inside the repository came from it. Sorted so the commit's file list and
+    /// message are deterministic.
     /// </summary>
-    private List<LocalPath> CollectPendingWriteFiles(string repositoryDirectory) =>
+    private List<File> CollectPendingWriteFiles(string repositoryDirectory) =>
         _pendingWriteQueue.ListPending()
-            .Select(f => f.GetPendingWrite())
-            .Where(w => w is not null && PathGuard.IsWithinRoot(repositoryDirectory, w.AbsolutePath.Value))
-            .Select(w => w!.AbsolutePath)
+            .Where(f => f.GetPendingWrite() is { } write &&
+                        PathGuard.IsWithinRoot(repositoryDirectory, write.AbsolutePath.Value))
+            .OrderBy(f => f.GetPendingWrite()!.AbsolutePath.Value, StringComparer.Ordinal)
             .ToList();
+
+    /// <summary>
+    /// Returns why the model's proposal cannot be queued, or null when it can.
+    /// The commented file was handed to the model fresh from the working tree.
+    /// Every other file was not: the model reproduced it from the ingested
+    /// snapshot, so each must still match that snapshot on disk, otherwise
+    /// approving the write would silently revert newer content.
+    /// </summary>
+    private string? ValidateProposal(
+        SyncTarget target, GitHubReviewCommentResponseObject comment, IReadOnlyList<File> files)
+    {
+        if (files.Count > _options.MaxFilesPerComment)
+            return $"{files.Count} files were proposed; the limit is {_options.MaxFilesPerComment} " +
+                   "(GitHub:MaxFilesPerComment).";
+
+        var commentedPath = ToAbsolutePath(target, comment.Path);
+
+        foreach (var file in files)
+        {
+            var write = file.GetPendingWrite()!;
+            var absolutePath = Path.GetFullPath(write.AbsolutePath.Value);
+            var relativePath = ToRepositoryRelative(target.RepositoryDirectory, absolutePath);
+
+            if (relativePath.Any(char.IsControl))
+                return "a proposed path contains control characters.";
+
+            if (ContainsSymbolicLink(target.RepositoryDirectory, absolutePath))
+                return $"'{relativePath}' is, or sits under, a symbolic link.";
+
+            if (SamePath(absolutePath, commentedPath))
+                continue;
+
+            var proposedBytes = Encoding.UTF8.GetByteCount(write.ProposedContent.Value);
+            if (proposedBytes > _options.MaxFileBytes)
+                return $"'{relativePath}' would be {proposedBytes} bytes; the limit is {_options.MaxFileBytes}.";
+
+            var baselineProblem = CheckBaseline(file, absolutePath, relativePath);
+            if (baselineProblem is not null)
+                return baselineProblem;
+        }
+
+        return null;
+    }
+
+    /// <summary>
+    /// A file the model was not given must match the snapshot it worked from.
+    /// A new file must not already exist on disk. Comparison ignores line
+    /// endings and surrounding whitespace, because packaging can add or strip them.
+    /// </summary>
+    private string? CheckBaseline(File file, string absolutePath, string relativePath)
+    {
+        if (!System.IO.File.Exists(absolutePath))
+            return file.Content.Length == 0
+                ? null
+                : $"'{relativePath}' no longer exists in the working tree.";
+
+        if (new FileInfo(absolutePath).Length > _options.MaxFileBytes)
+            return $"'{relativePath}' exceeds {_options.MaxFileBytes} bytes.";
+
+        string onDisk;
+        try
+        {
+            onDisk = System.IO.File.ReadAllText(absolutePath);
+        }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
+        {
+            return $"'{relativePath}' could not be read: {ex.Message}";
+        }
+
+        return NormalizeForComparison(onDisk) == NormalizeForComparison(file.Content)
+            ? null
+            : $"'{relativePath}' differs from the ingested snapshot the model worked from. " +
+              "Re-run 'ingest', then sync again.";
+    }
+
+    private static string NormalizeForComparison(string text) =>
+        text.Replace("\r\n", "\n").Trim();
+
+    private static bool SamePath(string left, string right) =>
+        string.Equals(Path.GetFullPath(left), Path.GetFullPath(right),
+            OperatingSystem.IsWindows() ? StringComparison.OrdinalIgnoreCase : StringComparison.Ordinal);
+
+    /// <summary>Drops the proposal from the file and from the global queue.</summary>
+    private void DiscardPendingWrites(IEnumerable<File> files)
+    {
+        foreach (var file in files)
+        {
+            var write = file.GetPendingWrite();
+            if (write is not null)
+                _pendingWriteQueue.TryResolve(write.AbsolutePath.Value, out _);
+
+            file.DiscardPendingWrite();
+        }
+    }
 
     private void QueueCommit(
         SyncTarget target,
@@ -445,17 +562,25 @@ public class PullRequestSyncService : IPullRequestSyncService
             ? extracted
             : "Applied the requested change.";
 
+        var relativeFiles = pendingFiles
+            .Select(f => ToRepositoryRelative(target.RepositoryDirectory, f.Value))
+            .ToList();
+
         var pending = new PendingCommit(
             new LocalPath(target.RepositoryDirectory),
             target.PullRequest,
             comment.Id,
             pendingFiles,
-            new Message(PullRequestPromptBuilder.BuildCommitMessage(comment)),
+            new Message(PullRequestPromptBuilder.BuildCommitMessage(comment, relativeFiles)),
             target.Pull.Head.Ref,
             new Message(summary));
 
+        var scope = relativeFiles.Count == 1
+            ? $"on '{comment.Path}'"
+            : $"on '{comment.Path}' covering {relativeFiles.Count} files ({string.Join(", ", relativeFiles)})";
+
         if (_pendingCommitQueue.Enqueue(pending))
-            notices.Add($"Commit queued for comment {comment.Id} on '{comment.Path}'. " +
+            notices.Add($"Commit queued for comment {comment.Id} {scope}. " +
                         "Run 'review': approve the write(s), then the commit.");
         else
             notices.Add($"A commit for comment {comment.Id} is already pending review.");

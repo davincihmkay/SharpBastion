@@ -28,4 +28,12 @@ public class GitHubOptions
     /// are skipped with a notice. Must be positive. Defaults to 25000.
     /// </summary>
     public int MaxFileBytes { get; set; } = 25_000;
+
+    /// <summary>
+    /// Most files 'pr sync' accepts in the proposal for a single review comment.
+    /// All of them go into one commit. A proposal with more files, or with any
+    /// file that fails validation, is discarded as a whole. Must be positive.
+    /// Defaults to 10.
+    /// </summary>
+    public int MaxFilesPerComment { get; set; } = 10;
 }
