@@ -27,6 +27,7 @@ public static class GitHubServiceCollectionExtensions
         services.AddSingleton<IGitHubProtocol, GitHubProtocol>();
         services.AddSingleton<PendingCommitQueue>();
         services.AddSingleton<ProcessedReviewCommentLedger>();
+        services.AddSingleton<PassJournal>();
         services.AddTransient<IPullRequestSyncService, PullRequestSyncService>();
         services.AddTransient<IPendingCommitExecutionService, PendingCommitExecutionService>();
         services.AddTransient<PullRequestController>();

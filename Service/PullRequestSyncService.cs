@@ -27,6 +27,7 @@ public class PullRequestSyncService : IPullRequestSyncService
     private readonly PendingWriteQueue _pendingWriteQueue;
     private readonly PendingCommitQueue _pendingCommitQueue;
     private readonly ProcessedReviewCommentLedger _ledger;
+    private readonly PassJournal _journal;
     private readonly GitHubOptions _options;
 
     public PullRequestSyncService(
@@ -36,6 +37,7 @@ public class PullRequestSyncService : IPullRequestSyncService
         PendingWriteQueue pendingWriteQueue,
         PendingCommitQueue pendingCommitQueue,
         ProcessedReviewCommentLedger ledger,
+        PassJournal journal,
         IOptions<GitHubOptions> options)
     {
         _gitHubClient = gitHubClient;
@@ -44,6 +46,7 @@ public class PullRequestSyncService : IPullRequestSyncService
         _pendingWriteQueue = pendingWriteQueue;
         _pendingCommitQueue = pendingCommitQueue;
         _ledger = ledger;
+        _journal = journal;
         _options = options.Value;
     }
 
@@ -98,7 +101,7 @@ public class PullRequestSyncService : IPullRequestSyncService
 
             if (skipReason is not null)
             {
-                SkipComment(target.PullRequest, comment, skipReason, notices);
+                SkipComment(target, comment, skipReason, notices);
                 continue;
             }
 
@@ -372,12 +375,16 @@ public class PullRequestSyncService : IPullRequestSyncService
 
     /// <summary>Marks the comment processed so it is not picked again, and tells the user why.</summary>
     private void SkipComment(
-        PullRequestReference pullRequest,
+        SyncTarget target,
         GitHubReviewCommentResponseObject comment,
         string reason,
         List<string> notices)
     {
-        _ledger.MarkProcessed(pullRequest, comment.Id);
+        _ledger.MarkProcessed(target.PullRequest, comment.Id);
+
+        var pass = BeginPass(target, comment);
+        _journal.Conclude(pass, PassState.Skipped, reason);
+
         notices.Add($"Skipped comment {comment.Id} ({reason}).");
     }
 
@@ -391,34 +398,60 @@ public class PullRequestSyncService : IPullRequestSyncService
         int remainingCandidates,
         List<string> notices)
     {
+        var pass = BeginPass(target, comment);
+
         var result = AskModel(target, comment, allComments, currentFile);
         notices.AddRange(result.Notices);
 
         if (!result.Success)
+        {
+            _journal.Conclude(pass, PassState.AskFailed, result.DisplayMessage);
             return new AskQuestionResultView(false, result.DisplayMessage, notices);
+        }
+
+        var modelSummary = PullRequestPromptBuilder.TryExtractSummary(result.DisplayMessage, out var extracted)
+            ? extracted
+            : null;
 
         var pendingFiles = CollectPendingWriteFiles(target.RepositoryDirectory);
 
         if (pendingFiles.Count == 0)
         {
             _ledger.MarkProcessed(target.PullRequest, comment.Id);
+            _journal.RecordProposal(pass, modelSummary, new List<PassFileChange>());
+            _journal.Conclude(pass, PassState.NoChange, modelSummary);
             notices.Add($"No file change was proposed for comment {comment.Id}. It is marked processed; no reply was posted.");
             return new AskQuestionResultView(true, result.DisplayMessage, notices);
         }
+
+        // Captured now: discarding a proposal clears the pending write it is read from.
+        var changes = BuildPassChanges(target, pendingFiles);
 
         // All-or-nothing: a multi-file fix is never half-queued.
         var rejection = ValidateProposal(target, comment, pendingFiles);
         if (rejection is not null)
         {
+            _journal.RecordProposal(
+                pass, modelSummary, changes.Select(c => c with { Status = PassFileStatus.Discarded }).ToList());
+
             DiscardPendingWrites(pendingFiles);
             _ledger.MarkProcessed(target.PullRequest, comment.Id);
+            _journal.Conclude(pass, PassState.Discarded, rejection);
+
             notices.Add($"Proposal for comment {comment.Id} discarded: {rejection} " +
                         "It is marked processed; no reply was posted.");
             return new AskQuestionResultView(true, result.DisplayMessage, notices);
         }
 
+        _journal.RecordProposal(pass, modelSummary, changes);
+
         var paths = pendingFiles.Select(f => f.GetPendingWrite()!.AbsolutePath).ToList();
-        QueueCommit(target, comment, paths, result.DisplayMessage, remainingCandidates, notices);
+        var commitId = QueueCommit(target, comment, paths, result.DisplayMessage, remainingCandidates, notices);
+
+        if (commitId is null)
+            _journal.Conclude(pass, PassState.Discarded, "A commit for this comment was already pending; its writes remain queued.");
+        else
+            _journal.AttachCommit(pass, commitId);
 
         return new AskQuestionResultView(true, result.DisplayMessage, notices);
     }
@@ -550,7 +583,8 @@ public class PullRequestSyncService : IPullRequestSyncService
         }
     }
 
-    private void QueueCommit(
+    /// <summary>Returns the queued commit's id, or null when one was already pending.</summary>
+    private string? QueueCommit(
         SyncTarget target,
         GitHubReviewCommentResponseObject comment,
         IReadOnlyList<LocalPath> pendingFiles,
@@ -579,15 +613,74 @@ public class PullRequestSyncService : IPullRequestSyncService
             ? $"on '{comment.Path}'"
             : $"on '{comment.Path}' covering {relativeFiles.Count} files ({string.Join(", ", relativeFiles)})";
 
+        string? queuedId = null;
+
         if (_pendingCommitQueue.Enqueue(pending))
+        {
+            queuedId = pending.Id;
             notices.Add($"Commit queued for comment {comment.Id} {scope}. " +
                         "Run 'review': approve the write(s), then the commit.");
+        }
         else
+        {
             notices.Add($"A commit for comment {comment.Id} is already pending review.");
+        }
 
         if (remainingCandidates > 0)
             notices.Add($"{remainingCandidates} further actionable comment(s). " +
                         $"Run 'pr sync {target.PullRequest.Number}' again after review.");
+
+        return queuedId;
+    }
+
+    // ── Pass journal ─────────────────────────────────────────────────────────
+
+    private int BeginPass(SyncTarget target, GitHubReviewCommentResponseObject comment) =>
+        _journal.Begin(
+            target.PullRequest,
+            target.Pull.Head.Ref,
+            new PassComment(comment.Id, comment.User?.Login, comment.Path, comment.Body ?? string.Empty, comment.HtmlUrl));
+
+    private List<PassFileChange> BuildPassChanges(SyncTarget target, IEnumerable<File> files) =>
+        files.Select(file =>
+        {
+            var write = file.GetPendingWrite()!;
+            var absolutePath = Path.GetFullPath(write.AbsolutePath.Value);
+            var (existedBefore, baseline) = ReadBaseline(target, absolutePath);
+
+            return new PassFileChange(
+                absolutePath,
+                ToRepositoryRelative(target.RepositoryDirectory, absolutePath),
+                existedBefore,
+                baseline,
+                write.ProposedContent.Value,
+                PassFileStatus.Proposed);
+        }).ToList();
+
+    /// <summary>
+    /// The file as it is on disk before any approved write. Never read through a
+    /// link, and never above the size limit: the journal must not become a way
+    /// to copy content from outside the repository or huge files into memory.
+    /// </summary>
+    private (bool ExistedBefore, string? Content) ReadBaseline(SyncTarget target, string absolutePath)
+    {
+        if (!System.IO.File.Exists(absolutePath))
+            return (false, null);
+
+        if (ContainsSymbolicLink(target.RepositoryDirectory, absolutePath))
+            return (true, null);
+
+        try
+        {
+            if (new FileInfo(absolutePath).Length > _options.MaxFileBytes)
+                return (true, null);
+
+            return (true, System.IO.File.ReadAllText(absolutePath));
+        }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
+        {
+            return (true, null);
+        }
     }
 
     // ── Helpers ──────────────────────────────────────────────────────────────

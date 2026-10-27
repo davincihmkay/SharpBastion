@@ -29,19 +29,22 @@ public class PendingCommitExecutionService : IPendingCommitExecutionService
     private readonly IGitHubClient _gitHubClient;
     private readonly ProcessedReviewCommentLedger _ledger;
     private readonly GitHubOptions _options;
+    private readonly PassJournal _passJournal;
 
     public PendingCommitExecutionService(
         PendingCommitQueue pendingCommitQueue,
         IGitCliClient gitCliClient,
         IGitHubClient gitHubClient,
         ProcessedReviewCommentLedger ledger,
-        IOptions<GitHubOptions> options)
+        IOptions<GitHubOptions> options,
+        PassJournal passJournal)
     {
         _pendingCommitQueue = pendingCommitQueue;
         _gitCliClient = gitCliClient;
         _gitHubClient = gitHubClient;
         _ledger = ledger;
         _options = options.Value;
+        _passJournal = passJournal;
     }
 
     public async Task<OperationResultView> ApproveAsync(ResolvePendingCommitCommand command)
@@ -84,6 +87,7 @@ public class PendingCommitExecutionService : IPendingCommitExecutionService
         if (toStage.Count == 0)
         {
             _ledger.MarkProcessed(commit.PullRequest, commit.ReviewCommentId);
+            _passJournal.RecordCommitOutcome(commit.Id, PassState.NothingToCommit);
             return new OperationResultView(false,
                 $"No approved changes on disk for comment {commit.ReviewCommentId} (all writes rejected or unchanged). " +
                 "Marked processed; nothing committed or posted.");
@@ -97,6 +101,7 @@ public class PendingCommitExecutionService : IPendingCommitExecutionService
         }
         catch (Exception ex)
         {
+            _passJournal.RecordCommitOutcome(commit.Id, PassState.CommitFailed, detail: ex.Message);
             return new OperationResultView(false,
                 $"Commit failed: {ex.Message} Staged changes may remain — inspect with 'git status'.");
         }
@@ -107,24 +112,28 @@ public class PendingCommitExecutionService : IPendingCommitExecutionService
         }
         catch (Exception ex)
         {
+            _passJournal.RecordCommitOutcome(commit.Id, PassState.PushFailed, sha, ex.Message);
             return new OperationResultView(false,
                 $"Committed locally as {Short(sha)} but the push failed: {ex.Message} Nothing was posted to the pull request.");
         }
 
         _ledger.MarkProcessed(commit.PullRequest, commit.ReviewCommentId);
+        _passJournal.RecordCommitOutcome(commit.Id, PassState.Pushed, sha);
+
+        var reply = BuildReply(commit, customReply, sha);
 
         try
         {
-            await _gitHubClient.ReplyToReviewCommentAsync(
-                commit.PullRequest,
-                commit.ReviewCommentId,
-                BuildReply(commit, customReply, sha));
+            await _gitHubClient.ReplyToReviewCommentAsync(commit.PullRequest, commit.ReviewCommentId, reply);
         }
         catch (Exception ex)
         {
+            _passJournal.RecordCommitOutcome(commit.Id, PassState.Pushed, detail: $"Reply failed: {ex.Message}");
             return new OperationResultView(true,
                 $"Pushed {Short(sha)} to '{commit.BranchName}'. [NOTICE] Reply on comment {commit.ReviewCommentId} failed: {ex.Message}");
         }
+
+        _passJournal.RecordCommitOutcome(commit.Id, PassState.Replied, postedReply: reply);
 
         return new OperationResultView(true,
             $"Pushed {Short(sha)} to '{commit.BranchName}' and replied on comment {commit.ReviewCommentId}" +
@@ -137,6 +146,7 @@ public class PendingCommitExecutionService : IPendingCommitExecutionService
             return new OperationResultView(false, $"No pending commit found for '{command.Id}'. Already resolved or unknown.");
 
         _ledger.MarkProcessed(commit.PullRequest, commit.ReviewCommentId);
+        _passJournal.RecordCommitOutcome(commit.Id, PassState.Rejected);
 
         var files = string.Join(", ", commit.Files.Select(f => ToRepositoryRelative(commit.RepositoryDirectory.Value, f.Value)));
         return new OperationResultView(true,
