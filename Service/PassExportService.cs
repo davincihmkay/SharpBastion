@@ -72,7 +72,9 @@ public class PassExportService : IPassExportService
         }
         catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
         {
-            var hint = File.Exists(path) ? " The file already exists; choose another --out or delete it." : string.Empty;
+            var hint = System.IO.File.Exists(path)
+                ? " The file already exists; choose another --out or delete it."
+                : string.Empty;
             return new OperationResultView(false, $"Could not write '{path}': {ex.Message}{hint}");
         }
 
