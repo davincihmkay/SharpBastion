@@ -5,7 +5,8 @@ namespace SharpBastion.Helper;
 /// <summary>
 /// Produces a unified-diff-style rendering of two text blobs, line by line.
 /// Presentation-only — used by the CLI review flow so full proposed file
-/// content is never dumped verbatim to the console.
+/// content is never dumped verbatim to the console, and by the pass report
+/// through <see cref="Compare"/>, which returns the same diff as structured data.
 /// </summary>
 public static class DiffFormatter
 {
@@ -24,6 +25,45 @@ public static class DiffFormatter
 
         return string.Join(Environment.NewLine, hunks.Select(FormatHunk));
     }
+
+    /// <summary>
+    /// The same diff as <see cref="BuildUnifiedDiff"/>, as data: hunks of lines
+    /// with 1-based line numbers, plus total added and removed line counts.
+    /// </summary>
+    public static DiffResult Compare(string originalContent, string proposedContent)
+    {
+        var oldLines = SplitLines(originalContent);
+        var newLines = SplitLines(proposedContent);
+
+        var ops = Diff(oldLines, newLines);
+        var hunks = GroupIntoHunks(ops);
+
+        var added = ops.Count(o => o.Kind == OpKind.Insert);
+        var removed = ops.Count(o => o.Kind == OpKind.Delete);
+
+        var views = hunks
+            .Select(h => new DiffHunk(
+                h.OldStart,
+                h.OldCount,
+                h.NewStart,
+                h.NewCount,
+                h.Ops.Select(ToDiffLine).ToList()))
+            .ToList();
+
+        return new DiffResult(views, added, removed);
+    }
+
+    private static DiffLine ToDiffLine(Op op) =>
+        new(
+            op.Kind switch
+            {
+                OpKind.Insert => DiffLineKind.Added,
+                OpKind.Delete => DiffLineKind.Removed,
+                _ => DiffLineKind.Context
+            },
+            op.Line,
+            op.OldIndex >= 0 ? op.OldIndex + 1 : (int?)null,
+            op.NewIndex >= 0 ? op.NewIndex + 1 : (int?)null);
 
     private static List<string> SplitLines(string content) =>
         string.IsNullOrEmpty(content)
@@ -148,3 +188,18 @@ public static class DiffFormatter
         return sb.ToString();
     }
 }
+
+public enum DiffLineKind
+{
+    Context,
+    Removed,
+    Added
+}
+
+/// <summary>One line of a diff. Numbers are 1-based; null on the side where the line does not exist.</summary>
+public sealed record DiffLine(DiffLineKind Kind, string Text, int? OldNumber, int? NewNumber);
+
+public sealed record DiffHunk(int OldStart, int OldCount, int NewStart, int NewCount, IReadOnlyList<DiffLine> Lines);
+
+/// <summary>Hunks with context, plus totals over the whole diff.</summary>
+public sealed record DiffResult(IReadOnlyList<DiffHunk> Hunks, int Added, int Removed);

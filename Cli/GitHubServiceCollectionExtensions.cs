@@ -32,6 +32,10 @@ public static class GitHubServiceCollectionExtensions
         services.AddTransient<IPendingCommitExecutionService, PendingCommitExecutionService>();
         services.AddTransient<PullRequestController>();
 
+        // Reads the journal only: resolving these never needs GITHUB_TOKEN.
+        services.AddTransient<IPassExportService, PassExportService>();
+        services.AddTransient<PassExportController>();
+
         return services;
     }
 }
